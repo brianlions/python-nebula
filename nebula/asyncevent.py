@@ -24,23 +24,15 @@
 import errno
 import fcntl
 import os
-import resource
 import select
+import resource
 import socket
 import sys
 import time
 
 # import our own module
-import debug_info
-import log
-
-# this is the defulat log handle that can be used by all the classes and
-# functions defined in this file
-_default_log_handle = log.ConsoleLogger(log_mask = log.Logger.mask_upto(log.Logger.NOTICE))
-
-def default_log_handle():
-    '''returns default log handle used by this module'''
-    return _default_log_handle
+from . import debug_info
+from . import log
 
 #  -----------------------------------------------------------------------------
 
@@ -58,9 +50,6 @@ def maximize_total_fds():
 
 # AUTOMATICALLY maximize the total number of files allowed to be opened by this
 # process.
-#
-# I assume users of this module are going to handle lots of concurrent socket
-# connections.
 maximize_total_fds()
 
 #  -----------------------------------------------------------------------------
@@ -71,11 +60,14 @@ class Error(Exception):
 class ExitNow(Exception):
     pass
 
-#  ---------------------------------------------------------------------------------------------------------------------
+#  -----------------------------------------------------------------------------
 
 class Dispatcher(log.WrappedLogger):
-    '''
-    Base class of file event.
+    '''Wrapper around lower level file (or socket) descriptor object.
+
+    This class turns a file (or socket) descriptor into a non-blocking object,
+    and when certain low level events fired, the asynchronous loop will detect
+    it and calls corresponding handler methods to handle it.
     '''
 
     def __init__(self, log_handle = None):
@@ -84,31 +76,59 @@ class Dispatcher(log.WrappedLogger):
     # 1. helper methods, implement these methods in derived classes
 
     def fileno(self):
+        '''Returns file descriptor of the open file (or socket).
+
+        NOTES:
+          Subclass must override this method.
+        '''
+
         raise NotImplementedError("{:s}.{:s}: fileno() not implemented".format(
             self.__class__.__module__, self.__class__.__name__))
 
     def close(self):
+        '''Closes the underlying file descriptor (or socket).
+
+        NOTES:
+          Subclass must override this method.
+        '''
+
         raise NotImplementedError("{:s}.{:s}: close() not implemented".format(
             self.__class__.__module__, self.__class__.__name__))
 
     # 2. predicate for AsyncEvent, implement these methods in derived classes
 
     def readable(self):
-        '''return True if we want to be notified when readable.'''
+        '''Determine whether read event on the underlying fd should be waited.
+
+        At the beginning of each round of the asynchronous loop, this method
+        will be called.
+        '''
 
         self.log_notice("{:s}.{:s}: using default readable()".format(
             self.__class__.__module__, self.__class__.__name__))
         return True
 
     def writable(self):
-        '''return True if we want to be notified when writable.'''
+        '''Determine whether write event on the underlying fd should be waited.
+
+        At the beginning of each round of the asynchronous loop, this method
+        will be called.
+        '''
 
         self.log_notice("{:s}.{:s}: using default writable()".format(
             self.__class__.__module__, self.__class__.__name__))
         return True
 
     def timeout(self):
-        '''time in seconds (as float) since the Epoch, None or 0 to disable timeout.'''
+        '''Determine whether timeout event on the underlying fd should be waited.
+
+        At the beginning of each round of the asynchronous loop, this method
+        will be called.
+
+        Returns:
+          time in seconds (as float) since the Epoch, if interested in timeout
+          event; either None or 0, if not interested in timeout event.
+        '''
 
         self.log_notice("{:s}.{:s}: using default timeout()".format(
             self.__class__.__module__, self.__class__.__name__))
@@ -118,36 +138,67 @@ class Dispatcher(log.WrappedLogger):
     #    classes
 
     def handle_read(self, ae_obj):
+        '''Called when the underlying fd is readable.
+
+        Args:
+          ae_obj: the AsyncEvent object this Dispatcher was associated with.
+        '''
+
         self.log_notice("{:s}.{:s}: using default handle_read()".format(
             self.__class__.__module__, self.__class__.__name__))
 
     def handle_write(self, ae_obj):
+        '''Called when the underlying fd is writable.
+
+        Args:
+          ae_obj: the AsyncEvent object this Dispatcher was associated with.
+        '''
+
         self.log_notice("{:s}.{:s}: using default handle_write()".format(
             self.__class__.__module__, self.__class__.__name__))
 
     def handle_timeout(self, ae_obj):
+        '''Called when the underlying fd is timed out.
+
+        Args:
+          ae_obj: the AsyncEvent object this Dispatcher was associated with.
+        '''
+
         self.log_notice("{:s}.{:s}: using default handle_timeout()".format(
             self.__class__.__module__, self.__class__.__name__))
 
     def handle_expt(self, ae_obj):
+        '''Called when there's out of band (OOB) data for the underlying fd.
+
+        Args:
+          ae_obj: the AsyncEvent object this Dispatcher was associated with.
+        '''
+
         self.log_notice("{:s}.{:s}: using default handle_expt()".format(
             self.__class__.__module__, self.__class__.__name__))
 
     def handle_error(self, ae_obj, exception_obj):
-        '''
-        Overwrite this method with carefulness:
-          1. this method does NOT has an accompanying method `handle_error_event()';
+        '''Called when an exception was raised and not handled.
+
+        This default version prints a traceback, then calls `handle_close()',
+        in order to dissociate the underlying fd from the AsyncEvent object and
+        closes it.
+
+        Args:
+          ae_obj: the AsyncEvent object this Dispatcher was associated with.
+
+        NOTES:
+          1. there's NO accompanying method `handle_error_event()';
           2. this method calls handle_close()!
-    
-        NOTE:
-          Subclass (e.g. D) may do necessary processing jobs, and use `super' to call this method.
-          e.g.
-            >>> class Derived(Dispatcher):
-            >>>   def handle_error(self, ae_obj, exception_obj):
-            >>>      ...
-            >>>      # do something
-            >>>      ...
-            >>>      super(Derived, self).handle_error(ae_obj, exception_obj)
+          3. Subclass (e.g. D) may do necessary cleanup, and use the `super()'
+             method to call this method:
+             e.g.
+               >>> class Derived(Dispatcher):
+               >>>   def handle_error(self, ae_obj, exception_obj):
+               >>>      ...
+               >>>      # do something
+               >>>      ...
+               >>>      super(Derived, self).handle_error(ae_obj, exception_obj)
         '''
 
         if exception_obj:
@@ -159,20 +210,24 @@ class Dispatcher(log.WrappedLogger):
         self.handle_close(ae_obj)
 
     def handle_close(self, ae_obj):
-        '''
-        Overwrite this method with carefulness:
-          1. this method does NOT has an accompanying method `handle_close_event()';
-          2. this method unregister `self' from `ae_obj' (if provided), and it self.close()!
-    
-        NOTE:
-          Subclass (e.g. D) may do necessary processing jobs, and use `super' to call this method.
-          e.g.
-            >>> class Derived(Dispatcher):
-            >>>   def handle_close(self, ae_obj):
-            >>>      ...
-            >>>      # do something
-            >>>      ...
-            >>>      super(Derived, self).handle_close(ae_obj)
+        '''Called when the underlying fd was closed.
+
+        Args:
+          ae_obj: the AsyncEvent object this Dispatcher was associated with.
+
+        NOTES:
+          1. there's NO accompanying method `handle_close_event()';
+          2. this method closes the underlying fd, after dissociate it from
+             `ae_obj';
+          3. Subclass (e.g. D) may do necessary cleanup, and use the `super()'
+             method to call this method:
+             e.g.
+               >>> class Derived(Dispatcher):
+               >>>   def handle_close(self, ae_obj):
+               >>>      ...
+               >>>      # do something
+               >>>      ...
+               >>>      super(Derived, self).handle_close(ae_obj)
         '''
 
         if ae_obj:
@@ -182,8 +237,11 @@ class Dispatcher(log.WrappedLogger):
         self.log_info("close, dispatcher {:s}".format(self))
         self.close()
 
-    # 4. following methods are called by AsyncEvent directly, normally user do
-    #    NOT need to re-implement these methods
+    # 4. Following methods are called by AsyncEvent directly. These methods are
+    #    used when implementing higher level dispatcher classes, in order to do
+    #    more sophisticated preparation (e.g. asynchronous TCP connection, SOCKS
+    #    connection, etc.), before passing control to thos user implemented
+    #    methods, e.g. handle_read(), handle_write(), readable(), writable() etc.
 
     def handle_read_event(self, ae_obj, call_user_func = True):
         if call_user_func:
@@ -219,12 +277,10 @@ class Dispatcher(log.WrappedLogger):
         else:
             return None
 
-#  ---------------------------------------------------------------------------------------------------------------------
+#  -----------------------------------------------------------------------------
 
 class ScheduledJob(log.WrappedLogger):
-    '''
-    Base class of time event.
-    '''
+    '''Base class of scheduled job.'''
 
     def __init__(self, log_handle = None):
         log.WrappedLogger.__init__(self, log_handle = log_handle)
@@ -232,23 +288,24 @@ class ScheduledJob(log.WrappedLogger):
     # implement these two methods in derived classes
 
     def schedule(self):
-        '''
-        Returns time in seconds (as float) since the Epoch, None or 0 to disable timeout.
+        '''Determine whether we need to schedule this job in the future or not.
+
+        Returns:
+          Time in seconds (as float) since the Epoch; or None or 0, if this job
+          no longer need to be scheduled in the future.
         '''
 
-        self.log_notice("{:s}.{:s}: using default timeout()".format(
+        self.log_notice("{:s}.{:s}: schedule() not implement".format(
             self.__class__.__module__, self.__class__.__name__))
         return None
 
     def handle_job_event(self, ae_obj):
-        '''
-        Handles the time event.
-        '''
+        '''Called to handle the job event.'''
 
         self.log_notice("{:s}.{:s}: using default handle_timeout()".format(
             self.__class__.__module__, self.__class__.__name__))
 
-#  ---------------------------------------------------------------------------------------------------------------------
+#  -----------------------------------------------------------------------------
 
 class AsyncEvent(log.WrappedLogger):
     '''
@@ -304,7 +361,7 @@ class AsyncEvent(log.WrappedLogger):
     def set_stop_flag(self):
         '''
         Try to stop the event loop.
-    
+
         Notes:
           This method may not work as expected, refer to method loop() for more information.
         '''
@@ -402,7 +459,7 @@ class AsyncEvent(log.WrappedLogger):
     def add_scheduled_job(self, job_obj):
         '''
         Adds a ScheduledJob instance.
-    
+
         Return the absolute time (since epoch, as float) the job will be started if successfully added, None if not added.
         '''
 
@@ -593,7 +650,7 @@ class AsyncEvent(log.WrappedLogger):
     def loop(self):
         '''
         Starts the event loop, returns immediately if no Dispatcher or TimeEvents object was being monitored.
-    
+
         Notes and TODOs:
           Sometimes this method might not return as you expected, because we might be blocked in the call to epoll.poll().
           So this issue should be fixed.
@@ -604,7 +661,7 @@ class AsyncEvent(log.WrappedLogger):
             self.__loop_step()
         self.log_notice("finishing %s" % self)
 
-#  ---------------------------------------------------------------------------------------------------------------------
+#  -----------------------------------------------------------------------------
 
 class _SocketDispatcher(Dispatcher):
     __socket_family_names = {
@@ -638,24 +695,22 @@ class _SocketDispatcher(Dispatcher):
             return "not_available"
         else:
             if self.__so_family == socket.AF_INET:
-                return "%s:%d" % (self.__local_addr[0], self.__local_addr[1])
+                return "{:s}:{:d}".format(self.__local_addr[0], self.__local_addr[1])
             elif self.__so_family == socket.AF_INET6:
-                return "[%s]:%d" % (self.__local_addr[0], self.__local_addr[1])
+                return "[{:s}]:{:d}".format(self.__local_addr[0], self.__local_addr[1])
             else:
                 return "unknown_type"
 
     def peer_addr_repr(self):
-        raise NotImplementedError("%s.%s: peer_addr_repr() not implemented" % \
-                                             (self.__class__.__module__, self.__class__.__name__))
+        raise NotImplementedError("{:s}.{:s}: peer_addr_repr() not implemented".format(
+            self.__class__.__module__, self.__class__.__name__))
 
     def is_connected(self):
-        raise NotImplementedError("%s.%s: is_connected() not implemented" % \
-                                             (self.__class__.__module__, self.__class__.__name__))
+        raise NotImplementedError("{:s}.{:s}: is_connected() not implemented".format(
+            self.__class__.__module__, self.__class__.__name__))
 
     def fileno(self):
-        '''
-        Returns file descriptor of the socket object.
-        '''
+        '''File descriptor of the underlying socket object.'''
 
         return self._sock.fileno()
 
@@ -684,11 +739,10 @@ class _SocketDispatcher(Dispatcher):
     def socket(self, so_family, so_type):
         '''
         Creates a non-blocking socket object.
-    
-        so_family:
-          socket.AF_INET, socket.AF_INET6, etc.
-        so_type:
-          socket.SOCK_STREAM, socket.SOCK_DGRAM, etc.
+
+        Args:
+          so_family: socket.AF_INET, socket.AF_INET6, etc.
+          so_type:   socket.SOCK_STREAM, socket.SOCK_DGRAM, etc.
         '''
 
         self.__so_family = so_family
@@ -697,25 +751,24 @@ class _SocketDispatcher(Dispatcher):
         self._sock.setblocking(0)
 
     def bind(self, addr, reuse_addr = False):
-        '''
-        Binds to local address.
-    
-        addr:
-          local address to bind to
-        reuse_addr:
-          if True and addr[0] (viz. port number) is non-zero, set socket option SO_REUSEADDR
+        '''Binds to local address.
+
+        Args:
+          addr:       local address to bind to
+          reuse_addr: if True and addr[0] (viz. port number) is non-zero, set
+                      socket option SO_REUSEADDR
         '''
 
         self.__local_addr = addr
-        self.log_info("binding to local address %s, SO_REUSEADDR %d" % (self.local_addr_repr(), reuse_addr))
+        self.log_info("binding to local address {:s}, SO_REUSEADDR {:d}".format(
+            self.local_addr_repr(), reuse_addr))
         if reuse_addr and addr[1]:
             # only if port number is not zero
             self.set_reuse_addr()
         return self._sock.bind(self.__local_addr)
 
     def set_reuse_addr(self):
-        '''
-        Sets socket option SO_REUSEADDR.
+        '''Sets socket option SO_REUSEADDR.
         '''
 
         try:
@@ -723,52 +776,54 @@ class _SocketDispatcher(Dispatcher):
         except socket.error:
             self.log_notice("failed setting option SO_REUSEADDR")
 
-#  ---------------------------------------------------------------------------------------------------------------------
+#  -----------------------------------------------------------------------------
 
 class TcpClientDispatcher(_SocketDispatcher):
     def __init__(self, sock = None, log_handle = None):
-        '''
-        Creates a Dispatcher instance with an uninitialized socket, or use the provided socket object.
-    
-        log_handle:
-          used to write log messages
-        sock:
-          used to initialize the socket object used by this Dispatcher
+        '''Creates a TCP client socket Dispatcher instance.
+
+        By default the underlying socket object will NOT be created immediately.
+        If a socket object is provided, use it instead of creating a new one.
+
+        Args:
+          log_handle: used to write log messages
+          sock:       used to initialize the socket object used by this Dispatcher
         '''
 
         _SocketDispatcher.__init__(self, sock = sock, log_handle = log_handle)
 
         self.__connected = False
         self.__peer_addr = None
-        self.__connect_timeout_at = None # absolute time in seconds (as float) since the Epoch
+        # absolute time in seconds (as float) since the Epoch
+        self.__connect_timeout_at = None
 
         if sock is not None:
             self._sock.setblocking(0)
             try:
                 self.__peer_addr = self._sock.getpeername()
-                # if the socket is not connected, then getpeername() will raise an exception with ENOTCONN, so the following
-                # call to getsockname() will always return the local address used.
+                # If the socket is not connected, then getpeername() will raise
+                # an exception with ENOTCONN. So the following call (if called)
+                # to getsockname() will always return the local address used.
                 self.set_local_addr(self._sock.getsockname())
                 self.__connected = True
             except socket.error as err:
                 if err.args[0] == errno.ENOTCONN:
-                    # if we got an unconnected socket
+                    # If we got an unconnected socket
                     self.__connected = False
                 else:
                     raise
 
-    def initialize(self, peer_addr = None, connect_timeout = None, local_addr = None, reuse_addr = True):
-        '''
-        Creates a non-blocking TCP socket (IPv6 is NOT supported yet).
-    
-        peer_addr:
-          remote address to connect to
-        connect_timeout:
-          number of seconds (as float) to wait before aborting the connection attempt
-        local_addr:
-          local address to bind to
-        reuse_addr:
-          whether to set socket option SO_REUSEADDR or not, ignored if `local_addr' is not provied
+    def initialize(self, peer_addr = None, connect_timeout = None,
+                   local_addr = None, reuse_addr = True):
+        '''Creates a non-blocking TCP socket (IPv6 is NOT supported yet).
+
+        Args:
+          peer_addr:       remote address to connect to
+          connect_timeout: number of seconds (as float) to wait before aborting
+                           the connection attempt
+          local_addr:      local address to bind to
+          reuse_addr:      whether to set socket option SO_REUSEADDR or not,
+                           ignored if `local_addr' is not provied
         '''
 
         self.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -790,28 +845,21 @@ class TcpClientDispatcher(_SocketDispatcher):
                 return "unknown_type"
 
     def __str__(self):
-        return "<%s.%s at %s {sock_fd:%d, sock_family:%s, sock_type:%s, connected:%d, local:%s, peer:%s}>" % \
-          (
-           self.__class__.__module__, self.__class__.__name__, hex(id(self)),
-           self.fileno(),
-           self.socket_family_repr(),
-           self.socket_type_repr(),
-           self.__connected,
-           self.local_addr_repr(),
-           self.peer_addr_repr(),
-           )
+        return "<%s.%s at %s {sock_fd:%d, sock_family:%s, sock_type:%s, connected:%d, local:%s, peer:%s}>" % (
+            self.__class__.__module__, self.__class__.__name__, hex(id(self)),
+            self.fileno(), self.socket_family_repr(), self.socket_type_repr(),
+            self.__connected, self.local_addr_repr(), self.peer_addr_repr(),)
 
     def is_connected(self):
         return self.__connected
 
     def connect(self, addr, timeout = None):
-        '''
-        Attempts to make a connection to the specified address.
-    
-        addr:
-          address to connect to
-        timeout:
-          number of seconds (as float) to wait before aborting the connection attempt
+        '''Attempts to make a connection to the specified address.
+
+        Args:
+          addr:    address to connect to
+          timeout: number of seconds (as float) to wait before aborting the
+                   connection attempt
         '''
 
         # try connect to the remote server, and timeout if required
@@ -820,11 +868,12 @@ class TcpClientDispatcher(_SocketDispatcher):
             self.__connect_timeout_at = time.time() + timeout
         err = self._sock.connect_ex(self.__peer_addr)
         if err in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EALREADY, errno.EINPROGRESS):
-            self.log_info("fd %d, connecting to %s in progress, errno %s" % (self.fileno(), self.peer_addr_repr(),
-                                                                            errno.errorcode[err]))
+            self.log_info("fd {:d}, connecting to {:s} in progress, errno {:s}".format(
+                self.fileno(), self.peer_addr_repr(), errno.errorcode[err]))
             return err
         elif err in (0, errno.EISCONN):
-            self.log_info("fd %d, connected to %s, errno %s" % (self.fileno(), self.peer_addr_repr(), errno.errorcode[err]))
+            self.log_info("fd {:d}, connected to {:s}, errno {:s}".format(
+                self.fileno(), self.peer_addr_repr(), errno.errorcode[err]))
             self.__connected = True
             self.set_local_addr(self._sock.getsockname())
             return err
@@ -854,11 +903,12 @@ class TcpClientDispatcher(_SocketDispatcher):
             return True
 
     def monitor_timeout(self, call_user_func = True):
-        # if not connected, and a connection timeout was specified, then wait before timeout
+        # if not connected, and a connection timeout was specified, then wait
+        # before timeout
         if not self.__connected:
             if self.__connect_timeout_at:
-                self.log_info("fd %d, connection attempt will be aborted at %s unless connected" % \
-                              (self.fileno(), log.Logger.timestamp_str(self.__connect_timeout_at)))
+                self.log_info("fd {:d}, connection attempt will be aborted at {:s} unless connected".format(
+                    self.fileno(), log.Logger.timestamp_str(self.__connect_timeout_at)))
             return self.__connect_timeout_at
 
         if call_user_func:
@@ -871,7 +921,8 @@ class TcpClientDispatcher(_SocketDispatcher):
             err = self._sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if err != 0:
                 raise socket.error(err, errno.errorcode[err])
-            self.log_info("fd %d, connected to %s" % (self.fileno(), self.peer_addr_repr()))
+            self.log_info("fd {:d}, connected to {:s}".format(self.fileno(),
+                                                              self.peer_addr_repr()))
             self.__connected = True
             self.set_local_addr(self._sock.getsockname())
         else:
@@ -879,18 +930,20 @@ class TcpClientDispatcher(_SocketDispatcher):
                 self.log_debug("calling handle_write()")
                 self.handle_write(ae_obj)
 
-#  ---------------------------------------------------------------------------------------------------------------------
+#  -----------------------------------------------------------------------------
 
 class TcpServerDispatcher(_SocketDispatcher):
 
     def __init__(self, sock = None, log_handle = None):
-        '''
-        Creates a Dispatcher instance with an uninitialized socket, or use the provided socket object.
-    
-        log_handle:
-          used to write log messages
-        sock:
-          used to initialize the socket object used by this Dispatcher, must be a TCP listening socket if not None!
+        '''Creates a TCP server socket Dispatcher instance.
+
+        By default the underlying socket object will NOT be created immediately.
+        If a socket object is provided, use it instead of creating a new one.
+
+        Args:
+          log_handle: used to write log messages
+          sock:       used to initialize the socket object used by this Dispatcher,
+                      must be a TCP listening socket if not None!
         '''
 
         _SocketDispatcher.__init__(self, sock = sock, log_handle = log_handle)
@@ -905,10 +958,10 @@ class TcpServerDispatcher(_SocketDispatcher):
     def is_connected(self):
         return False
 
-    def initialize(self, local_addr, reuse_addr = True, listen_backlog = socket.SOMAXCONN):
-        '''
-        Creates a non-blocking TCP server socket (IPv6 is NOT supported yet).
-    
+    def initialize(self, local_addr, reuse_addr = True,
+                   listen_backlog = socket.SOMAXCONN):
+        '''Creates a non-blocking TCP server socket (IPv6 is NOT supported yet).
+
         local_addr:
           local address to bind to
         reuse_addr:
@@ -922,52 +975,47 @@ class TcpServerDispatcher(_SocketDispatcher):
         self.listen(listen_backlog)
 
     def __str__(self):
-        return "<%s.%s at %s {sock_fd:%d, sock_family:%s, sock_type:%s, accepting:%d, local:%s, backlog:%s}>" % \
-          (
-           self.__class__.__module__, self.__class__.__name__, hex(id(self)),
-           self.fileno(),
-           self.socket_family_repr(),
-           self.socket_type_repr(),
-           self._accepting,
-           self.local_addr_repr(),
-           self._listen_backlog and str(self._listen_backlog) or "unknown",
-           )
+        return "<%s.%s at %s {sock_fd:%d, sock_family:%s, sock_type:%s, accepting:%d, local:%s, backlog:%s}>" % (
+            self.__class__.__module__, self.__class__.__name__, hex(id(self)),
+            self.fileno(), self.socket_family_repr(), self.socket_type_repr(),
+            self._accepting, self.local_addr_repr(),
+            self._listen_backlog and str(self._listen_backlog) or "unknown",)
 
     def listen(self, backlog = socket.SOMAXCONN):
         self._sock.listen(backlog)
         self._listen_backlog = backlog
         self._accepting = True
-        self.log_notice("server socket is ready %s" % self)
+        self.log_notice("server socket is ready {:s}".format(self))
 
     def __new_peer_addr(self, conn_sock, conn_addr):
         if conn_sock.family == socket.AF_INET:
-            return "%s:%d" % (conn_addr[0], conn_addr[1])
+            return "{:s}:{:d}".format(conn_addr[0], conn_addr[1])
         elif conn_sock.family == socket.AF_INET6:
-            return "[%s]:%d" % (conn_addr[0], conn_addr[1])
+            return "[{:s}]:{:d}".format(conn_addr[0], conn_addr[1])
         else:
             return "unknown_type"
 
     def accept(self):
         try:
             conn_sock, conn_addr = self._sock.accept()
-            self.log_info("new connection accepted, fd %d, peer address %s" % (conn_sock.fileno(),
-                                                                               self.__new_peer_addr(conn_sock, conn_addr)))
+            self.log_info("new connection accepted, fd {:d}, peer address {:s}".format(
+                conn_sock.fileno(), self.__new_peer_addr(conn_sock, conn_addr)))
             return conn_sock, conn_addr
         except TypeError as e:
-            self.log_notice("caught exception TypeError: %s" % e)
+            self.log_notice("caught exception TypeError: {:s}".format(e))
             return None
         except socket.error as why:
             if why.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN, errno.ECONNABORTED):
                 return None
             else:
-                self.log_warning("caught UNEXPECTED exception socket.error: %s" % e)
+                self.log_warning("caught UNEXPECTED exception socket.error: {:s}".format(e))
                 raise
 
     def prepare_serving_client(self, conn_sock, conn_addr, ae_obj):
-        self.log_notice("%s.%s: using default prepare_serving_client()" % \
-                        (self.__class__.__module__, self.__class__.__name__))
-        self.log_info("closing newly accepted connect without serving, fd %d, peer address %s" % \
-                      (conn_sock.fileno(), str(conn_addr)))
+        self.log_notice("{:s}.{:s}: using default prepare_serving_client()".format(
+            self.__class__.__module__, self.__class__.__name__))
+        self.log_info("closing newly accepted connect without serving, fd {:d}, peer address {:s}".format(
+            conn_sock.fileno(), str(conn_addr)))
         conn_sock.close()
 
     def monitor_readable(self):
@@ -979,241 +1027,12 @@ class TcpServerDispatcher(_SocketDispatcher):
     def timeout(self):
         return None
 
-    # The reason we re-implement handle_read() instead of handle_read_event() is, user can derive from this class, and
-    # use a customized handle_read() with enhanced features (e.g. access control beased on white-list or black-list).
-    # Maybe it is strange to force the user to re-implement handle_read_event().
+    # The reason we re-implement handle_read() instead of handle_read_event() is,
+    # user can derive from this class, and use a customized handle_read() with
+    # enhanced features (e.g. access control beased on white-list or black-list).
+    # It is strange to force the user to re-implement handle_read_event().
     def handle_read(self, ae_obj):
         new_client = self.accept()
         if new_client:
             conn_sock, conn_addr = new_client[0], new_client[1]
             self.prepare_serving_client(conn_sock, conn_addr, ae_obj)
-
-#=======================================================================================================================
-# following classes and functions are provided for demonstration and testing.
-#=======================================================================================================================
-
-class DemoTestClientDispatcher(TcpClientDispatcher):
-    '''
-    Use for testing, also for demonstration of the usage of this module.
-    '''
-
-    def __init__(self, sock = None, log_handle = None):
-        TcpClientDispatcher.__init__(self, sock = sock, log_handle = log_handle)
-
-        self.__request_data = b'''GET /tools/client_address.php HTTP/1.1\r
-Host: 50.116.3.188\r
-Accept: text/plain, text/html\r
-Accept-Encoding: deflate\r
-User-Agent: AsyncEvent-test-py\r
-\r
-'''
-
-        self.__response_data = b''
-
-    def readable(self):
-        self.log_info("func called")
-        return True
-
-    def writable(self):
-        self.log_info("len(self.__request_data): %d ```%s'''" % (len(self.__request_data), self.__request_data.decode('utf-8')))
-        return len(self.__request_data) > 0
-
-    def timeout(self):
-        if len(self.__request_data):
-            return None
-        else:
-            return int(time.time() + 3)
-
-    def handle_read(self, ae_obj):
-        recv = self._sock.recv(4096)
-        if len(recv):
-            self.__response_data += recv
-            self.log_info("%d bytes recv, %d bytes in total: ```%s'''" % (len(recv),
-                                                                          len(self.__response_data),
-                                                                          self.__response_data.decode('utf-8')))
-        else:
-            self.log_info("connection closed by remote node")
-            self.handle_close(ae_obj)
-
-    def handle_write(self, ae_obj):
-        sent = self._sock.send(self.__request_data)
-        self.__request_data = self.__request_data[sent:]
-        self.log_info("%d bytes sent, %d bytes remaining" % (sent, len(self.__request_data)))
-
-    def handle_timeout(self, ae_obj):
-        if not len(self.__request_data):
-            self.log_info("all data was sent, connection was idle for a while, closing ...")
-            self.handle_close(ae_obj)
-
-class DemoTestConnectedClientDispatcher(TcpClientDispatcher):
-    '''
-    Sent a greeting message to remote client, then close.
-    '''
-
-    def __init__(self, sock, max_idle_secs = 5.0, log_handle = None):
-        TcpClientDispatcher.__init__(self, sock = sock, log_handle = log_handle)
-        self._response = ("hello client %s (server %s)\n" % (self.peer_addr_repr(), self.local_addr_repr())).encode('utf-8')
-        self._last_activity_time = time.time()
-        self._max_idle_secs = max_idle_secs
-
-    def readable(self):
-        return False
-
-    def writable(self):
-        return len(self._response) > 0
-
-    def timeout(self):
-        return self._last_activity_time + self._max_idle_secs
-
-    def handle_write(self, ae_obj):
-        sent = self._sock.send(self._response)
-        self.log_info("%d of %d bytes sent to client (local %s <---> peer %s)" % (sent,
-                                                                                  len(self._response),
-                                                                                  self.local_addr_repr(),
-                                                                                  self.peer_addr_repr(),
-                                                                                  ))
-        self._response = self._response[sent:]
-        if len(self._response) == 0:
-            self.handle_close(ae_obj)
-        else:
-            self._last_activity_time = time.time()
-
-    def handle_timeout(self, ae_obj):
-        self.log_info("closing idle connection, no activity during last %f secs, sock_fd %d (local %s <---> peer %s)" % \
-                      (self._max_idle_secs, self.fileno(), self.local_addr_repr(), self.peer_addr_repr(),)
-                      )
-        self.handle_close(ae_obj)
-
-class DemoTestServerTimeEvent(ScheduledJob):
-    def __init__(self, log_handle = None):
-        ScheduledJob.__init__(self, log_handle = log_handle)
-
-        self._count = 0
-        self._max_count = 20
-        self._interval_sec = 0.1
-
-    def schedule(self):
-        if self._count < self._max_count:
-            self._count += 1
-            return time.time() + self._interval_sec
-        else:
-            return None
-
-    def handle_job_event(self, ae_obj):
-        self.log_info("scheduled sub job %d / %d finished, interval %.3f sec" % \
-                      (self._count, self._max_count, self._interval_sec))
-
-class DemoTestAsyncEventInspect(ScheduledJob):
-    def __init__(self, log_handle = None):
-        ScheduledJob.__init__(self, log_handle = log_handle)
-
-        self._count = 0
-        self._max_count = 5
-        self._interval_sec = 0.5
-
-    def schedule(self):
-        if self._count < self._max_count:
-            self._count += 1
-            return time.time() + self._interval_sec
-        else:
-            return None
-
-    def handle_job_event(self, ae_obj):
-        self.log_info("inspection %d / %d finished, ae_obj %s" % (self._count, self._max_count, ae_obj))
-
-class DemoTestServerDispatcher(TcpServerDispatcher):
-    '''
-    Use for testing, also for demonstration of the usage of this module.
-    '''
-
-    def __init__(self, sock = None, log_handle = None):
-        TcpServerDispatcher.__init__(self, sock = sock, log_handle = log_handle)
-
-        self._total_connections = 0
-        self._num_conns_recently = 0
-        self._report_interval = 3
-        self._max_idle_report_count = 5
-        self._idle_report_count = 0
-
-    def prepare_serving_client(self, conn_sock, conn_addr, ae_obj):
-        self._num_conns_recently += 1
-        self._total_connections += 1
-        if False:
-            self.log_info("closing newly accepted connect without serving, fd %d, peer address %s" % \
-                          (conn_sock.fileno(), str(conn_addr)))
-            conn_sock.close()
-        else:
-            ae_obj.register(DemoTestConnectedClientDispatcher(conn_sock, log_handle = self.get_log_handle()))
-
-    def timeout(self):
-        return time.time() + self._report_interval
-
-    def handle_timeout(self, ae_obj):
-        self.log_info("%s.%s handling timeout event!" % (self.__class__.__module__,
-                                                         self.__class__.__name__))
-
-        if not self._num_conns_recently:
-            self._idle_report_count += 1
-        else:
-            self.log_info("number of recent connections %d" % self._num_conns_recently)
-            self._num_conns_recently = 0
-            self._idle_report_count = 0
-
-        if self._idle_report_count == self._max_idle_report_count:
-            self.log_info("closing server socket, %d connections in total" % self._total_connections)
-            self.handle_close(ae_obj)
-
-def test(test_name, log_level = 'info'):
-    '''
-    Use for testing, also for demonstration of the usage of this module.
-    '''
-
-    levels = {
-              'debug':   log.Logger.DEBUG,
-              'info':    log.Logger.INFO,
-              'notice':  log.Logger.NOTICE,
-              'warning': log.Logger.WARNING,
-              'err':     log.Logger.ERR,
-              'crit':    log.Logger.CRIT,
-              'alert':   log.Logger.ALERT,
-              'emerg':   log.Logger.EMERG,
-              }
-
-    if test_name not in ('client', 'server'):
-        raise ValueError("invalid parameter `%s' (client|server)" % test_name)
-    if log_level not in levels:
-        raise ValueError("invalid parameter `%s' (debug|info|notice|warning|err|crit|alert|emerg)" % log_level)
-
-    log_handle = default_log_handle()
-    log_handle.set_max_level(levels[log_level])
-
-    ae = AsyncEvent(log_handle = log_handle)
-    if test_name == 'client':
-        mc = DemoTestClientDispatcher(log_handle = log_handle)
-        mc.initialize(peer_addr = ('50.116.3.188', 80), connect_timeout = 3.0,
-                      local_addr = ('0.0.0.0', 54321), reuse_addr = True)
-        ae.register(mc)
-    else:
-        ms = DemoTestServerDispatcher(log_handle = log_handle)
-        ms.initialize(local_addr = ('0.0.0.0', 8888), reuse_addr = True, listen_backlog = 5)
-        ae.register(ms)
-
-        job = DemoTestServerTimeEvent(log_handle = log_handle)
-        ae.add_scheduled_job(job)
-
-        job = DemoTestAsyncEventInspect(log_handle = log_handle)
-        ae.add_scheduled_job(job)
-    ae.loop()
-    log_handle.notice("----- Bingo! Test finished successfully! -----")
-
-def main():
-    if len(sys.argv) not in (2, 3):
-        print("usage: %s client|server [debug|info|notice|warning|err|crit|alert|emerg]" % sys.argv[0], file = sys.stderr)
-        sys.exit(1)
-    if len(sys.argv) == 2:
-        test(sys.argv[1])
-    else:
-        test(sys.argv[1], sys.argv[2])
-
-if __name__ == '__main__':
-    main()
