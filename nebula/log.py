@@ -293,7 +293,7 @@ class WrappedLogger(object):
 
     def set_log_handle(self, log_handle):
         '''Set new log handle to be used.
-        
+
         Args:
           log_handle: new log handle to be used
         Returns:
@@ -310,7 +310,7 @@ class WrappedLogger(object):
 
     def get_log_handle(self):
         '''Get current log handle current in use.
-        
+
         Returns:
           Current log handle in use, value might be None.
         '''

@@ -43,6 +43,8 @@ User-Agent: AsyncEvent-test-py\r
 
         self.__response_data = b''
 
+        self.__idle_connection = 3.0
+
     def readable(self):
         self.log_info("func called")
         return True
@@ -55,7 +57,7 @@ User-Agent: AsyncEvent-test-py\r
         if len(self.__request_data):
             return None
         else:
-            return int(time.time() + 3)
+            return int(time.time() + self.__idle_connection)
 
     def handle_read(self, ae_obj):
         recv = self._sock.recv(4096)
@@ -74,8 +76,12 @@ User-Agent: AsyncEvent-test-py\r
         self.log_info("%d bytes sent, %d bytes remaining" % (sent, len(self.__request_data)))
 
     def handle_timeout(self, ae_obj):
+        if not self.is_connected():
+            self.log_notice("connection attempt time out, closing socket ...")
+            self.handle_close(ae_obj)
         if not len(self.__request_data):
-            self.log_info("all data was sent, connection was idle for a while, closing ...")
+            self.log_info("all data was sent, connection was idle for a {:.3f} sec, closing ...".format(
+                self.__idle_connection))
             self.handle_close(ae_obj)
 
 class DemoTestConnectedClientDispatcher(TcpClientDispatcher):
@@ -196,7 +202,7 @@ class DemoTestServerDispatcher(TcpServerDispatcher):
             self.log_info("closing server socket, %d connections in total" % self._total_connections)
             self.handle_close(ae_obj)
 
-def test(test_name, log_level = 'info'):
+def test(test_name, log_level = 'info', event_api = "default"):
     '''
     Use for testing, also for demonstration of the usage of this module.
     '''
@@ -212,18 +218,27 @@ def test(test_name, log_level = 'info'):
               'emerg':   log.Logger.EMERG,
               }
 
+    apis = {
+            "default": AsyncEvent.API_DEFAULT,
+            "epoll":   AsyncEvent.API_EPOLL,
+            "poll":    AsyncEvent.API_POLL,
+            "select":  AsyncEvent.API_SELECT,
+            }
+
     if test_name not in ('client', 'server'):
         raise ValueError("invalid parameter `%s' (client|server)" % test_name)
     if log_level not in levels:
         raise ValueError("invalid parameter `%s' (debug|info|notice|warning|err|crit|alert|emerg)" % log_level)
+    if event_api not in apis:
+        raise ValueError("invalid parameter `%s' (default|epoll|poll|select)" % event_api)
 
     log_handle = log.ConsoleLogger(log_mask = log.Logger.mask_upto(log.Logger.NOTICE))
     log_handle.set_max_level(levels[log_level])
 
-    ae = AsyncEvent(log_handle = log_handle)
+    ae = AsyncEvent(log_handle = log_handle, api = apis[event_api])
     if test_name == 'client':
         mc = DemoTestClientDispatcher(log_handle = log_handle)
-        mc.initialize(peer_addr = ('www.example.com', 80), connect_timeout = 3.0,
+        mc.initialize(peer_addr = ('www.example.com', 80), connect_timeout = 10.0,
                       local_addr = ('0.0.0.0', 54321), reuse_addr = True)
         ae.register(mc)
     else:
@@ -240,13 +255,21 @@ def test(test_name, log_level = 'info'):
     log_handle.notice("----- Bingo! Test finished successfully! -----")
 
 def main():
-    if len(sys.argv) not in (2, 3):
-        print("usage: %s client|server [debug|info|notice|warning|err|crit|alert|emerg]" % sys.argv[0], file = sys.stderr)
+    if len(sys.argv) not in (2, 3, 4):
+        print('''\
+usage: %s client|server [log_level [event_api]]
+    log_level: debug, info, notice, warning, err, crit, alert, emerg
+    event_api: default, epoll, poll, select
+''' % sys.argv[0], file = sys.stderr)
+
         sys.exit(1)
+
     if len(sys.argv) == 2:
         test(sys.argv[1])
-    else:
+    elif len(sys.argv) == 3:
         test(sys.argv[1], sys.argv[2])
+    else:
+        test(sys.argv[1], sys.argv[2], sys.argv[3])
 
 if __name__ == '__main__':
     main()
