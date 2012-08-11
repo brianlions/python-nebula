@@ -21,6 +21,7 @@
 import time
 import traceback
 import os
+import sys
 
 class Logger(object):
     '''
@@ -282,6 +283,7 @@ class ConsoleLogger(Logger):
         print("[{:s} {:s} {:s}:{:d}:{:s}] {:s}".format(self.timestamp_str(use_gmtime, show_timezone),
                                                        self.level_name(level, abbr = True),
                                                        file_name, line_num, func_name, msg))
+        sys.stdout.flush()
 
 #-------------------------------------------------------------------------------
 

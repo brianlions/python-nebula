@@ -57,7 +57,7 @@ User-Agent: AsyncEvent-test-py\r
         if len(self.__request_data):
             return None
         else:
-            return int(time.time() + self.__idle_connection)
+            return time.time() + self.__idle_connection
 
     def handle_read(self, ae_obj):
         recv = self._sock.recv(4096)
@@ -239,7 +239,7 @@ def test(test_name, log_level = 'info', event_api = "default"):
     if test_name == 'client':
         mc = DemoTestClientDispatcher(log_handle = log_handle)
         mc.initialize(peer_addr = ('www.example.com', 80), connect_timeout = 10.0,
-                      local_addr = ('0.0.0.0', 54321), reuse_addr = True)
+                      local_addr = ('0.0.0.0', 0), reuse_addr = True)
         ae.register(mc)
     else:
         ms = DemoTestServerDispatcher(log_handle = log_handle)

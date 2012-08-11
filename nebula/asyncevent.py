@@ -22,10 +22,8 @@
 '''
 
 import errno
-import fcntl
 import os
 import select
-import resource
 import socket
 import sys
 import time
@@ -42,9 +40,12 @@ def maximize_total_fds():
     '''
 
     try:
+        import resource
         (soft, hard) = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft is not hard:
             resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except ImportError:
+        pass
     except:
         pass
 
@@ -234,7 +235,6 @@ class Dispatcher(log.WrappedLogger):
             self.log_info("unregister, dispatcher {:s}, ae {:s}".format(self, ae_obj))
             ae_obj.unregister(self)
 
-        self.log_info("close, dispatcher {:s}".format(self))
         self.close()
 
     # 4. Following methods are called by AsyncEvent directly. These methods are
@@ -311,19 +311,157 @@ class _SelectApiWrapper(object):
     SELECT_IN, SELECT_OUT, SELECT_ERR = 0x01, 0x02, 0x04
 
     def __init__(self):
-        raise NotImplementedError("{:s}.{:s}: not implemented".format(
-            self.__class__.__module__, self.__class__.__name__))
+        # mapping from fd to events monitored on that fd
+        self._monitored = {}
+
+    def register(self, fd, eventmask = (SELECT_IN | SELECT_OUT | SELECT_ERR)):
+        '''Register a file descriptor.
+
+        Registering a file descriptor that's already registered is NOT an error.
+
+        Args:
+          fd:        (int) file descriptor
+          eventmask: (int) optional bitmask of events being waited for
+        '''
+
+        self._monitored[fd] = eventmask
+
+    def unregister(self, fd):
+        '''Remove a file descriptor being tracked.
+
+        Raises:
+          KeyError if fd was never registered.
+        '''
+
+        del self._monitored[fd]
+
+    def modify(self, fd, eventmask):
+        '''Modifies an already registered fd.
+
+        Raises:
+          IOError with errno set to ENOENT, if the fd was never registered.
+        '''
+
+        if fd not in self._monitored:
+            raise IOError(errno.ENOENT)
+        self._monitored[fd] = eventmask
+
+    def poll(self, timeout = None):
+        '''Polls the set of registered file descriptors for events.
+
+        Args:
+          timeout: timeout in seconds (as float), 0 to return immediately,
+                   negative or None to block until at least one event was
+                   fired.
+
+        Returns:
+          A possibly empty list containing (fd, event) 2-tuples for the
+          descriptors that have events or errors to report.
+        '''
+
+        rd = []
+        wr = []
+        exp = []
+        for fd, eventmask in self._monitored.items():
+            if eventmask & self.SELECT_IN:
+                rd.append(fd)
+            if eventmask & self.SELECT_OUT:
+                wr.append(fd)
+            if eventmask & self.SELECT_ERR:
+                exp.append(fd)
+
+        (rd, wr, exp) = select.select(rd, wr, exp, timeout)
+
+        mapping = {}
+        for fd in rd:
+            mapping[fd] = self.SELECT_IN
+        for fd in wr:
+            if fd in mapping:
+                mapping[fd] |= self.SELECT_OUT
+            else:
+                mapping[fd] = self.SELECT_OUT
+        for fd in exp:
+            if fd in mapping:
+                mapping[fd] |= self.SELECT_ERR
+            else:
+                mapping[fd] = self.SELECT_ERR
+
+        return [(fd, events) for (fd, events) in mapping.items()]
 
 #------------------------------------------------------------------------------
 
 class AsyncEvent(log.WrappedLogger):
-    '''
-    Asynchronous events handling, based on select.epoll().
-    '''
+    '''Asynchronous events handling, based on Python builtin module `select'.'''
 
     API_DEFAULT, API_EPOLL, API_POLL, API_SELECT = 0, 1, 2, 3
 
     __api_names = {API_EPOLL: "epoll", API_POLL: "poll", API_SELECT: "select"}
+
+    def __init__(self, raise_exceptions = True, api = API_DEFAULT,
+                 log_handle = None):
+        '''Asynchronous event loop.
+
+        Args:
+          raise_exceptions: If value of this argument is True, then attempting
+                            to register() an already registered dispatcher, or
+                            to unregister() a not registered dispatcher, will
+                            raise an IOError exception.
+          api:              Specifies the event API to be used, valid values
+                            are API_DEFAULT, API_EPOLL, API_POLL, API_SELECT.
+                            Note that this argument is just a hint, if the
+                            specified API is not supported by the operating
+                            system, this class will automatically choose an
+                            API availabl.
+          log_handle:       A log handle to be used, None to disable logging.
+        '''
+
+        log.WrappedLogger.__init__(self, log_handle = log_handle)
+
+        # poll object for I/O events
+        if api <= self.API_EPOLL and hasattr(select, 'epoll'):
+            self.__event_api_init(self.API_EPOLL)
+        elif api <= self.API_POLL and hasattr(select, 'poll'):
+            self.__event_api_init(self.API_POLL)
+        elif api <= self.API_SELECT and hasattr(select, 'select'):
+            self.__event_api_init(self.API_SELECT)
+        else:
+            raise ValueError("API {:d} is not supported".format(api))
+
+        #=======================================================================
+        # NOTE:
+        #   This feature is NOT implemented yet!!!
+        #
+        # Tips:
+        #   Use os.read() & os.write().
+        #=======================================================================
+        # pipe used by set_stop_flag() to make epoll.poll() return
+        self._pipe_rd_end, self._pipe_wr_end = os.pipe()
+
+        self.__set_nonblock_flag(self._pipe_rd_end)
+        self.__set_nonblock_flag(self._pipe_wr_end)
+
+        self.log_debug("AsyncEvent initialized, api {:s}{:s}, pipe (r {:d}, w {:d})".format(
+            self.event_api_name(),
+            self.event_api() == self.API_EPOLL \
+            and ", epoll_fd {:d}".format(self._pollster.fileno()) or "",
+            self._pipe_rd_end, self._pipe_wr_end))
+
+        # --- file events related ---
+
+        # mapping from fd to dispatcher object
+        self._registered_dispatchers = {}
+        # mapping from fd to events monitored
+        self._monitored_events = {}
+        # list of monitored fds with timeout, item is 2-tuple of (timeout, fd)
+        self._fds_with_timeout = []
+
+        # --- time events related ---
+        self._time_events = []
+
+        # raise an exception in case of error
+        self._raise_exceptions = raise_exceptions
+
+        self._stop_flag = False
 
     def __event_api_init(self, api):
         if api == self.API_EPOLL:
@@ -357,72 +495,20 @@ class AsyncEvent(log.WrappedLogger):
             self._event_err_mask = _SelectApiWrapper.SELECT_ERR
 
         else:
-            raise ValueError("api {:d} is unknown".format(api))
-
-    def __init__(self, raise_exceptions = True, api = API_DEFAULT, log_handle = None):
-        '''
-        If raise_exceptions is True, raise an exception when failed registering or unregistering new Dispatcher object.
-        '''
-
-        log.WrappedLogger.__init__(self, log_handle = log_handle)
-
-        # poll object for I/O events
-        if api <= self.API_EPOLL and hasattr(select, 'epoll'):
-            self.__event_api_init(self.API_EPOLL)
-        elif api <= self.API_POLL and hasattr(select, 'poll'):
-            self.__event_api_init(self.API_POLL)
-        elif api <= self.API_SELECT and hasattr(select, 'select'):
-            self.__event_api_init(self.API_SELECT)
-        else:
-            raise ValueError("api {:d} is unknown".format(api))
-
-        #=======================================================================
-        # NOTE:
-        #   This feature is NOT implemented yet!!!
-        #
-        # Tips:
-        #   Use os.read() & os.write().
-        #=======================================================================
-        # pipe used by set_stop_flag() to make epoll.poll() return
-        self._pipe_rd_end, self._pipe_wr_end = os.pipe()
-
-        self.__set_nonblock_flag(self._pipe_rd_end)
-        # XXX: do we really needed to set this flag for self._pipe_wr_end?
-        self.__set_nonblock_flag(self._pipe_wr_end)
-        self.log_warning("@@@@@ NOT IMPLEMENTED: pipe (r {:d}, w {:d}) not used! @@@@@".format(
-            self._pipe_rd_end, self._pipe_wr_end))
-
-        self.log_debug("AsyncEvent instance initialized, api {:s}{:s}, pipe (r {:d}, w {:d})".format(
-            self.event_api_name(),
-            self.event_api() == self.API_EPOLL and ", epoll_fd {:d}".format(self._pollster.fileno()) or "",
-            self._pipe_rd_end, self._pipe_wr_end))
-
-        # ----- file events related --------------------------------------------
-
-        # mapping from fd to dispatcher object
-        self._registered_dispatchers = {}
-        # mapping from fd to events monitored
-        self._monitored_events = {}
-        # list of monitored fds with timeout, every item is a tuple of (timeout, fd)
-        self._fds_with_timeout = []
-
-        # ----- time events related --------------------------------------------
-        self._time_events = []
-
-        # instead of returning an error code, raise an exception in case of error
-        self._raise_exceptions = raise_exceptions
-
-        self._stop_flag = False
+            raise ValueError("API {:d} is not supported".format(api))
 
     def event_api_name(self):
+        "String representation of the event API used."
+
         return self.__api_names[self._event_api]
 
     def event_api(self):
+        "Event API used."
+
         return self._event_api
 
     def set_stop_flag(self):
-        '''
-        Try to stop the event loop.
+        '''Try to stop the event loop.
 
         Notes:
           This method may not work as expected, refer to method loop() for more
@@ -432,30 +518,42 @@ class AsyncEvent(log.WrappedLogger):
         self._stop_flag = True
 
     def get_stop_flag(self):
+        '''Check if the stop was set.'''
+
         return self._stop_flag
 
     def num_of_dispatchers(self):
-        '''Returns number of Dispatcher objects being monitored by this
-        AsyncEvent instance.
-        '''
+        '''Returns number of Dispatcher objects being monitored.'''
 
         return len(self._registered_dispatchers)
 
     def num_of_scheduled_jobs(self):
-        '''
-        Returns number of ScheduledJob objects being monitored by this AsyncEvent instance.
-        '''
+        '''Returns number of ScheduledJob scheduled.'''
+
         return len(self._time_events)
 
     def __str__(self):
         return "<%s.%s at %s {api: %s%s, pipe_rd:%d, pipe_wr:%d, dispatchers:%d, jobs:%d, stop_flag:%d}>" % \
             (self.__class__.__module__, self.__class__.__name__, hex(id(self)),
              self.event_api_name(),
-             self.event_api() == self.API_EPOLL and ", epoll_fd:{:d}".format(self._pollster.fileno()) or "",
+             self.event_api() == self.API_EPOLL \
+             and ", epoll_fd:{:d}".format(self._pollster.fileno()) or "",
              self._pipe_rd_end, self._pipe_wr_end, self.num_of_dispatchers(),
              self.num_of_scheduled_jobs(), self._stop_flag,)
 
     def register(self, disp_obj):
+        '''Register a dispatcher object.
+
+        Returns:
+          If registered succesfully, return True. If failed, depends on the
+          value of raise_exceptions passed to __init__(), may either return
+          False or raise an exception.
+
+        Raises:
+          TypeError: if the supplied object is not an instance of Dispatcher.
+          IOError:   with errno EEXIST if the dispatcher was already registered.
+        '''
+
         if not isinstance(disp_obj, Dispatcher):
             if self._raise_exceptions:
                 raise TypeError('disp_obj {:s} is not an instance of Dispatcher'.format(repr(disp_obj)))
@@ -499,9 +597,22 @@ class AsyncEvent(log.WrappedLogger):
         elif not self._raise_exceptions:
             return False
         else:
-            raise ValueError("fd {:d} was already registered".format(disp_obj.fileno()))
+            raise IOError(errno.EEXIST,
+                          "fd {:d} was already registered".format(disp_obj.fileno()))
 
     def unregister(self, disp_obj):
+        '''Unregister a dispatcher object.
+
+        Returns:
+          If unregistered succesfully, return True. If failed, depends on the
+          value of raise_exceptions passed to __init__(), may either return
+          False or raise an exception.
+
+        Raises:
+          TypeError: if the supplied object is not an instance of Dispatcher.
+          IOError:   with errno ENOENT if the dispatcher was already registered.
+        '''
+
         if not isinstance(disp_obj, Dispatcher):
             if self._raise_exceptions:
                 raise TypeError('disp_obj {:s} is not an instance of Dispatcher'.format(repr(disp_obj)))
@@ -519,14 +630,15 @@ class AsyncEvent(log.WrappedLogger):
         elif not self._raise_exceptions:
             return False
         else:
-            raise ValueError("fd {:d} is not registered".format(disp_obj.fileno()))
+            raise IOError(errno.ENOENT,
+                          "fd {:d} is not registered".format(disp_obj.fileno()))
 
     def add_scheduled_job(self, job_obj):
-        '''
-        Adds a ScheduledJob instance.
+        '''Schedule to execute the job in the future.
 
-        Return the absolute time (since epoch, as float) the job will be started
-        if successfully added, None if not added.
+        Returns:
+          Absolute time (since epoch, as float) the job will be started, or
+          None if not scheduled.
         '''
 
         timeout = job_obj.schedule()
@@ -537,11 +649,18 @@ class AsyncEvent(log.WrappedLogger):
             return False
 
     def __set_nonblock_flag(self, fd):
-        '''
-        Sets the O_NONBLOCK flag for the supplied file descriptor.
+        '''Set O_NONBLOCK flag for the supplied file descriptor.
+
+        Returns:
+          True if set, False otherwise.
+
+        Notes:
+          Not supported on Windows.
         '''
 
         try:
+            import fcntl
+
             flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             if flags < 0:
                 return False
@@ -552,7 +671,9 @@ class AsyncEvent(log.WrappedLogger):
 
             return True
         except IOError as err:
-            self.log_notice("fcntl() failed setting flag O_NONBLOCK, exception %s" % err)
+            self.log_notice("fcntl() failed setting O_NONBLOCK on fd {:d}, exception {:s}".format(fd, err))
+            return False
+        except ImportError:
             return False
 
     def __process_fired_events(self, fd, flags):
@@ -562,25 +683,26 @@ class AsyncEvent(log.WrappedLogger):
             # We need to check if fd is in self._registered_dispatchers, 'cause
             # those `handle_*' methods might remove `disp_obj' from the
             # AsyncEvent instance (viz. self) used here.
-            if (flags & self._event_in_mask) \
-            and (fd in self._registered_dispatchers):
-                self.log_debug("fd {:d}, calling handle_read_event()".format(fd))
-                disp_obj.handle_read_event(self)
 
-            if (flags & self._event_out_mask) \
-            and (fd in self._registered_dispatchers):
-                self.log_debug("fd {:d}, calling handle_write_event()".format(fd))
-                disp_obj.handle_write_event(self)
-
+            # 1st: PRI event
             if (self._event_pri_mask != self._event_in_mask) \
             and (flags & self._event_pri_mask) \
             and (fd in self._registered_dispatchers):
-                self.log_debug("fd {:d} calling handle_expt_event()".format(fd))
                 disp_obj.handle_expt_event(self)
 
+            # 2nd: IN event
+            if (flags & self._event_in_mask) \
+            and (fd in self._registered_dispatchers):
+                disp_obj.handle_read_event(self)
+
+            # 3rd: OUT event
+            if (flags & self._event_out_mask) \
+            and (fd in self._registered_dispatchers):
+                disp_obj.handle_write_event(self)
+
+            # 4th: HUP and ERR event
             if (flags & (self._event_hup_mask | self._event_err_mask)) \
             and (fd in self._registered_dispatchers):
-                self.log_debug("fd {:d}, calling handle_close()".format(fd))
                 disp_obj.handle_close(self)
         except (ExitNow, KeyboardInterrupt, SystemExit):
             raise
@@ -613,12 +735,16 @@ class AsyncEvent(log.WrappedLogger):
                     nearest_timeout = nt
 
         try:
+            # NOTE:
+            #  select.poll() requires the timeout be specified in milliseconds,
+            #  but select.epoll() and select.select() require it specified in
+            #  seconds (as float).
+            if nearest_timeout and self.event_api() == self.API_POLL:
+                nearest_timeout = int(nearest_timeout * 1000)
             result = self._pollster.poll(nearest_timeout)
         except (select.error, IOError) as err:
             if err.args[0] != errno.EINTR:
                 raise
-            self.log_info("interrupted, errno {:s}".format(
-                errno.errorcode[err.args[0]]))
             result = []
 
         if len(result):
@@ -629,9 +755,11 @@ class AsyncEvent(log.WrappedLogger):
                         flag_names.append("IN")
                     if flags & self._event_out_mask:
                         flag_names.append("OUT")
-                    if flags & self._event_pri_mask:
+                    if (flags & self._event_pri_mask) \
+                    and (self._event_pri_mask != self._event_in_mask):
                         flag_names.append("PRI")
-                    if flags & self._event_hup_mask:
+                    if (flags & self._event_hup_mask) \
+                    and (self._event_hup_mask != self._event_err_mask):
                         flag_names.append("HUP")
                     if flags & self._event_err_mask:
                         flag_names.append("ERR")
@@ -661,16 +789,6 @@ class AsyncEvent(log.WrappedLogger):
                 new_timeout = job_obj.schedule()
                 if new_timeout:
                     self._time_events.append((new_timeout, job_obj))
-
-    @classmethod
-    def __compare_timeout(cls, va, vb):
-        delta = va - vb
-        if delta < 0:
-            return -1
-        elif delta == 0:
-            return 0
-        else:
-            return 1
 
     def __sort_timeout_fds(self):
         self._fds_with_timeout = sorted(self._fds_with_timeout,
@@ -725,18 +843,21 @@ class AsyncEvent(log.WrappedLogger):
             self.log_debug("fd {:d}, no timeout event".format(fd))
 
     def loop(self):
-        '''Starts the event loop, returns immediately if no Dispatcher or
-        TimeEvents object was being monitored.
+        '''Starts the event loop
+
+        Event loop will terminate if no Dispatcher or ScheduledJob is available.
 
         NOTES (or TODOs):
-          Sometimes this method might not return as you expected, because we
-          might be blocked in the call to epoll.poll().
+          Sometimes this method might not terminate as you expected, because we
+          might be blocked in the call of poll().
         '''
 
         self.log_notice("starting {:s}".format(self))
+
         while (not self.get_stop_flag()) \
         and (self.num_of_dispatchers() or self.num_of_scheduled_jobs()):
             self.__loop_step()
+
         self.log_notice("finishing {:s}".format(self))
 
 #  -----------------------------------------------------------------------------
@@ -745,7 +866,6 @@ class _SocketDispatcher(Dispatcher):
     __socket_family_names = {
                              socket.AF_INET:  "AF_INET",
                              socket.AF_INET6: "AF_INET6",
-                             socket.AF_UNIX:  "AF_UNIX",
                              }
 
     __socket_type_names = {
@@ -794,7 +914,6 @@ class _SocketDispatcher(Dispatcher):
 
     def close(self):
         self._sock.close()
-        self.log_info("socket closed")
 
     def socket_family(self):
         return self.__so_family
@@ -815,8 +934,7 @@ class _SocketDispatcher(Dispatcher):
             return "unknown"
 
     def socket(self, so_family, so_type):
-        '''
-        Creates a non-blocking socket object.
+        '''Creates a non-blocking socket object.
 
         Args:
           so_family: socket.AF_INET, socket.AF_INET6, etc.
@@ -846,8 +964,7 @@ class _SocketDispatcher(Dispatcher):
         return self._sock.bind(self.__local_addr)
 
     def set_reuse_addr(self):
-        '''Sets socket option SO_REUSEADDR.
-        '''
+        '''Sets socket option SO_REUSEADDR.'''
 
         try:
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -926,7 +1043,8 @@ class TcpClientDispatcher(_SocketDispatcher):
         return "<%s.%s at %s {sock_fd:%d, sock_family:%s, sock_type:%s, connected:%d, local:%s, peer:%s}>" % (
             self.__class__.__module__, self.__class__.__name__, hex(id(self)),
             self.fileno(), self.socket_family_repr(), self.socket_type_repr(),
-            self.__connected, self.local_addr_repr(), self.peer_addr_repr(),)
+            self.__connected, self.local_addr_repr(), self.peer_addr_repr(),
+            )
 
     def is_connected(self):
         return self.__connected
@@ -969,7 +1087,6 @@ class TcpClientDispatcher(_SocketDispatcher):
             return False
 
         if call_user_func:
-            self.log_debug("calling readable()")
             return self.readable()
         else:
             return True
@@ -980,7 +1097,6 @@ class TcpClientDispatcher(_SocketDispatcher):
             return True
 
         if call_user_func:
-            self.log_debug("calling writable()")
             return self.writable()
         else:
             return True
@@ -1010,7 +1126,6 @@ class TcpClientDispatcher(_SocketDispatcher):
             self.set_local_addr(self._sock.getsockname())
         else:
             if call_user_func:
-                self.log_debug("calling handle_write()")
                 self.handle_write(ae_obj)
 
     def handle_timeout_event(self, ae_obj, call_user_func = True):
@@ -1024,7 +1139,6 @@ class TcpClientDispatcher(_SocketDispatcher):
             self.log_info("fd {:d}, connection to {:s} timedout".format(
                 self.fileno(), self.peer_addr_repr()))
         if call_user_func:
-            self.log_debug("calling handle_timeout()")
             self.handle_timeout(ae_obj)
 
 #  -----------------------------------------------------------------------------
