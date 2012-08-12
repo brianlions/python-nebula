@@ -370,6 +370,9 @@ class _SelectApiWrapper(object):
             if eventmask & self.SELECT_ERR:
                 exp.append(fd)
 
+        # Negative timeout won't be accepted by select.select()!
+        if (timeout is not None) and timeout < 0:
+            timeout = None
         (rd, wr, exp) = select.select(rd, wr, exp, timeout)
 
         mapping = {}
@@ -739,7 +742,9 @@ class AsyncEvent(log.WrappedLogger):
             #  select.poll() requires the timeout be specified in milliseconds,
             #  but select.epoll() and select.select() require it specified in
             #  seconds (as float).
-            if nearest_timeout and self.event_api() == self.API_POLL:
+            if nearest_timeout \
+            and (self.event_api() == self.API_POLL) \
+            and (nearest_timeout > 0):
                 nearest_timeout = int(nearest_timeout * 1000)
             result = self._pollster.poll(nearest_timeout)
         except (select.error, IOError) as err:
