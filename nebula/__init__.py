@@ -18,8 +18,16 @@
 # along with pynebula. If not, see <http://www.gnu.org/licenses/>.
 #
 
-__all__ = ["asyncevent",
-           "log", ]
+__all__ = [
+           "asyncevent",
+           "debug_info",
+           "histogram",
+           "log",
+           "sig_num",
+           ]
 
-#from . import asyncevent
+from . import asyncevent
+from . import debug_info
+from . import histogram
 from . import log
+from . import sig_num
