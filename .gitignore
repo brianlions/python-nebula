@@ -2,7 +2,9 @@
 .project
 .pydevproject
 .settings/
+.cache/
 
 *.pyc
 *.pyd
 *.pyo
+*.py3
