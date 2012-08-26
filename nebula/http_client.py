@@ -47,6 +47,8 @@ class SimpleHttpClient(object):
     _PROLOGUE_ENCODING = 'iso-8859-1'
     _BODY_ENCODING = 'iso-8859-1'
     _HTTP_CLIENT_VERSION = 'HTTP/1.1'
+    _HTTP_PORT = 80
+    _HTTPS_PORT = 443
 
     _default_additional_headers = {
         'Accept':          'text/html,text/plain;q=0.9, */*;q=0.8',
@@ -148,7 +150,7 @@ class SimpleHttpClient(object):
 
     @property
     def headers(self):
-        return self._response_headers
+        return self._response_headers.copy()
 
     @property
     def contents(self):
@@ -227,40 +229,78 @@ class SimpleHttpClient(object):
             try:
                 name, value = header_line.split(': ')
                 name = name.lower()
-                # TODO check for duplicated headers (e.g. 'Set-Cookie' etc.)
-                self._response_headers[name] = value
+                if name != 'set-cookie':
+                    self._response_headers[name] = value
+                else:
+                    if 'set-cookie' in self._response_headers:
+                        self._response_headers['set-cookie'].append(value)
+                    else:
+                        self._response_headers['set-cookie'] = [value]
+
             except ValueError:
                 raise HttpClientError("invalid header line: `{:s}'".format(
                     header_line))
 
     def fetch_page(self, url, headers = {}, method = 'GET', body = None):
+        '''Fetch the specified URL.
+
+        Args:
+          url:     resource to fetch
+          headers: user-supplied headers to send
+          method:  HTTP request method to use
+          body:    additional content to send
+        '''
+
         self._reset()
 
         self._used = True
 
-        netloc, path = urllib.parse.urlsplit(url)[1:3]
+        customized_headers = headers.copy()
+
+        # urlsplit(): set scheme to `http', in case it is not supplied in `url'
+        scheme, netloc, path = urllib.parse.urlsplit(url)[0:3]
         if not netloc:
             raise HttpClientError("network location missing!")
-        headers['Host'] = netloc
+        customized_headers['Host'] = netloc
         if not path:
             request_uri = "/" + url[url.find(netloc) + len(netloc) : ]
         else:
             request_uri = url[url.find(netloc) + len(netloc) : ]
 
+        if (not scheme) or scheme == 'http':
+            port_num = self._HTTP_PORT
+#        elif scheme == 'https':
+#            port_num = self._HTTPS_PORT
+        else:
+            raise HttpClientError("Unsupported scheme `{:s}'".format(scheme))
+
+        pos_colon = netloc.find(':')
+        if pos_colon < 0:
+            pass
+        elif pos_colon == 0:
+            raise HttpClientError("Invalid network location `{:s}'".format(netloc))
+        elif pos_colon < len(netloc) - 1:
+            port_num = int(netloc[pos_colon + 1 : ])
+            netloc = netloc[:pos_colon]
+        elif pos_colon == len(netloc) - 1:
+            netloc = netloc[:pos_colon]
+
         self._prologue_rows.append(self._request_line_format.format(
             method = method, request_uri = request_uri,
             http_version = self._HTTP_CLIENT_VERSION))
 
-        for k, v in headers.items():
+        for k, v in customized_headers.items():
             self._prologue_rows.append("{:s}: {:s}".format(k, v))
         for k, v in self._default_additional_headers.items():
-            if k not in headers:
+            if k not in customized_headers:
                 self._prologue_rows.append("{:s}: {:s}".format(k, v))
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+
         try:
-            self._socket.connect(('127.0.0.1', 80))
+            self.log_message("connecting to ``{:s}:{:d}''".format(netloc, port_num))
+            self._socket.connect((netloc, port_num))
 
             self._send_prologue()
 
