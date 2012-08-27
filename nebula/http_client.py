@@ -55,7 +55,7 @@ class SimpleHttpClient(object):
         'Accept-Encoding': 'gzip;q=0.9, deflate;q=0.5, identity;q=0.3, */*;q=0',
         'Accept-Language': 'zh-cn,zh;q=0.8, en_US;q=0.5, en;q=0.3',
         'Cache-Control':   'max-age=0',
-        'Connection':      'keep-alive',
+        'Connection':      'close',
         'User-Agent':      CommonUserAgent.Default,
         }
 
@@ -64,11 +64,13 @@ class SimpleHttpClient(object):
     def __init__(self, verbose = False):
         '''Initialize an HTTP client instance.'''
 
-        self._used = False
-
         self._verbose = verbose
 
         self._socket = None
+        # save peer info, in case it's a persistent connection (keep-alive).
+        self._peer_name = ''
+        self._peer_ip = ''
+        self._peer_port = 0
 
         # request line and headers to send
         self._prologue_rows = []
@@ -104,14 +106,6 @@ class SimpleHttpClient(object):
 
     def _reset(self):
         '''Reset all member variables, if necessary.'''
-
-        if not self._used:
-            return
-        self._used = False
-
-        # self._verbose is not changed by intention
-
-        self._socket = None
 
         self._prologue_rows = []
 
@@ -241,6 +235,12 @@ class SimpleHttpClient(object):
                 raise HttpClientError("invalid header line: `{:s}'".format(
                     header_line))
 
+    def close(self):
+        if self._socket:
+            self._socket.close()
+            self._socket = None
+            self._peer_name, self._peer_ip, self._peer_port = '', '', 0
+
     def fetch_page(self, url, headers = {}, method = 'GET', body = None):
         '''Fetch the specified URL.
 
@@ -253,15 +253,14 @@ class SimpleHttpClient(object):
 
         self._reset()
 
-        self._used = True
+        # make all head field names titlecased
+        customized_headers = dict([(k.title(), v) for k, v in headers.items()])
 
-        customized_headers = headers.copy()
-
-        # urlsplit(): set scheme to `http', in case it is not supplied in `url'
         scheme, netloc, path = urllib.parse.urlsplit(url)[0:3]
         if not netloc:
-            raise HttpClientError("network location missing!")
-        customized_headers['Host'] = netloc
+            raise HttpClientError("Malformed URL (do not forget the scheme, e.g. `http://')")
+        if 'Host' not in customized_headers:
+            customized_headers['Host'] = netloc
         if not path:
             request_uri = "/" + url[url.find(netloc) + len(netloc) : ]
         else:
@@ -285,61 +284,79 @@ class SimpleHttpClient(object):
         elif pos_colon == len(netloc) - 1:
             netloc = netloc[:pos_colon]
 
+        # the request line
         self._prologue_rows.append(self._request_line_format.format(
             method = method, request_uri = request_uri,
             http_version = self._HTTP_CLIENT_VERSION))
-
+        # make `Host:' the first header line
+        self._prologue_rows.append("{:s}: {:s}".format('Host',
+            customized_headers.pop('Host')))
+        # other headers
         for k, v in customized_headers.items():
             self._prologue_rows.append("{:s}: {:s}".format(k, v))
         for k, v in self._default_additional_headers.items():
             if k not in customized_headers:
                 self._prologue_rows.append("{:s}: {:s}".format(k, v))
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.log_message("connecting to ``{:s}:{:d}''".format(netloc, port_num))
 
+        if (not self._socket) \
+        or (netloc not in (self._peer_name, self._peer_ip)) \
+        or (port_num != self._peer_port):
+            self.close() # different peer node, we can not reuse the socket
 
-        try:
-            self.log_message("connecting to ``{:s}:{:d}''".format(netloc, port_num))
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket.connect((netloc, port_num))
+            self._peer_name = netloc
+            self._peer_ip, self._peer_port = self._socket.getpeername()
+            self.log_message("new socket created, fd = {:d}".format(self._socket.fileno()))
+        else:
+            self.log_message("reuse existing socket, fd = {:d}".format(self._socket.fileno()))
 
-            self._send_prologue()
+        self._send_prologue()
 
-            while True:
-                # short buf to receive headers, long buf to receive contents
-                delta = self._socket.recv(self._response_headers and 4096 or 1024)
-                if not delta: # closed by peer node
+        while True:
+            # short buf to receive headers, long buf to receive contents
+            delta = self._socket.recv(self._response_headers and 4096 or 1024)
+            if not delta: # closed by peer node
+                break
+
+            if not self._response_headers:
+                self._prologue += delta
+                # search for the delimiter
+                pos = self._prologue.find(b'\r\n\r\n')
+                if pos < 0:
+                    continue
+                if pos == 0:
+                    # Oops!
+                    pass
+
+                if len(self._prologue) >= pos + 4:
+                    # 1. value might be empty
+                    # 2. `delta' will be appended to `self._chunks' by the
+                    #    code several lines after this line.
+                    delta = self._prologue[pos + 4 : ]
+
+                self._prologue = self._prologue[:pos] # ``CRLF CRLF'' discarded
+                self.log_message("status line and headers:\n```{:s}'''".format(
+                    self._prologue.decode(self._PROLOGUE_ENCODING)))
+                self._parse_prologue()
+
+            self._pending_blocks.append(delta)
+            if self._response_headers.get('transfer-encoding', '').startswith('chunked'):
+                if self._extract_all_chunks():
                     break
-
-                if not self._response_headers:
-                    self._prologue += delta
-                    # search for the delimiter
-                    pos = self._prologue.find(b'\r\n\r\n')
-                    if pos < 0:
-                        continue
-                    if pos == 0:
-                        # Oops!
-                        pass
-
-                    if len(self._prologue) >= pos + 4:
-                        # 1. value might be empty
-                        # 2. `delta' will be appended to `self._chunks' by the
-                        #    code several lines after this line.
-                        delta = self._prologue[pos + 4 : ]
-
-                    self._prologue = self._prologue[:pos] # ``CRLF CRLF'' discarded
-                    self.log_message("status line and headers:\n```{:s}'''".format(
-                        self._prologue.decode(self._PROLOGUE_ENCODING)))
-                    self._parse_prologue()
-
-                self._pending_blocks.append(delta)
-                if self._response_headers.get('transfer-encoding', '').startswith('chunked'):
-                    if self._extract_all_chunks():
-                        break
-                elif 'content-length' in self._response_headers:
-                    if self._extract_all_segments():
-                        break
-        finally:
-            self._socket.close()
+            elif 'content-length' in self._response_headers:
+                if self._extract_all_segments():
+                    break
+        if 'keep-alive' in self._response_headers.get('connection', '').lower() \
+        or 'keep-alive' in self._response_headers:
+            self.log_message("Keep-Alive found in response, fd = {:d}".format(
+                self._socket.fileno()))
+        else:
+            self.log_message("Keep-Alive not found in response, closing fd = {:d}".format(
+                self._socket.fileno()))
+            self.close()
 
     def _extract_all_segments(self):
         if not self._shortage:
