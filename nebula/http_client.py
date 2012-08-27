@@ -50,7 +50,7 @@ class SimpleHttpClient(object):
     _HTTP_PORT = 80
     _HTTPS_PORT = 443
 
-    _default_additional_headers = {
+    _DEFAULT_ADDITIONAL_HEADERS = {
         'Accept':          'text/html,text/plain;q=0.9, */*;q=0.8',
         'Accept-Encoding': 'gzip;q=0.9, deflate;q=0.5, identity;q=0.3, */*;q=0',
         'Accept-Language': 'zh-cn,zh;q=0.8, en_US;q=0.5, en;q=0.3',
@@ -59,7 +59,10 @@ class SimpleHttpClient(object):
         'User-Agent':      CommonUserAgent.Default,
         }
 
-    _request_line_format = "{method:s} {request_uri:s} {http_version:s}"
+    _REQUEST_LINE_FORMAT = "{method:s} {request_uri:s} {http_version:s}"
+
+    _HEADER_RECV_LEN = 1024
+    _CONTENT_RECV_LEN = 8192
 
     def __init__(self, verbose = False):
         '''Initialize an HTTP client instance.'''
@@ -221,7 +224,7 @@ class SimpleHttpClient(object):
 
         for header_line in lines[1:]:
             try:
-                name, value = header_line.split(': ')
+                name, value = [t.strip() for t in header_line.split(':', 1)]
                 name = name.lower()
                 if name != 'set-cookie':
                     self._response_headers[name] = value
@@ -285,7 +288,7 @@ class SimpleHttpClient(object):
             netloc = netloc[:pos_colon]
 
         # the request line
-        self._prologue_rows.append(self._request_line_format.format(
+        self._prologue_rows.append(self._REQUEST_LINE_FORMAT.format(
             method = method, request_uri = request_uri,
             http_version = self._HTTP_CLIENT_VERSION))
         # make `Host:' the first header line
@@ -294,12 +297,13 @@ class SimpleHttpClient(object):
         # other headers
         for k, v in customized_headers.items():
             self._prologue_rows.append("{:s}: {:s}".format(k, v))
-        for k, v in self._default_additional_headers.items():
+        for k, v in self._DEFAULT_ADDITIONAL_HEADERS.items():
             if k not in customized_headers:
                 self._prologue_rows.append("{:s}: {:s}".format(k, v))
 
         self.log_message("connecting to ``{:s}:{:d}''".format(netloc, port_num))
 
+        # create a new socket, or reuse an existing one
         if (not self._socket) \
         or (netloc not in (self._peer_name, self._peer_ip)) \
         or (port_num != self._peer_port):
@@ -315,9 +319,13 @@ class SimpleHttpClient(object):
 
         self._send_prologue()
 
+        # now it's time to receive the response from remote server
+
         while True:
             # short buf to receive headers, long buf to receive contents
-            delta = self._socket.recv(self._response_headers and 4096 or 1024)
+            delta = self._socket.recv(self._response_headers \
+                                      and self._CONTENT_RECV_LEN \
+                                      or self._HEADER_RECV_LEN)
             if not delta: # closed by peer node
                 break
 
@@ -349,6 +357,10 @@ class SimpleHttpClient(object):
             elif 'content-length' in self._response_headers:
                 if self._extract_all_segments():
                     break
+            elif 'close' in self._response_headers.get('connection', ''):
+                self._move_all_bytes()
+
+        # close socket if it's necessary
         if 'keep-alive' in self._response_headers.get('connection', '').lower() \
         or 'keep-alive' in self._response_headers:
             self.log_message("Keep-Alive found in response, fd = {:d}".format(
@@ -357,6 +369,9 @@ class SimpleHttpClient(object):
             self.log_message("Keep-Alive not found in response, closing fd = {:d}".format(
                 self._socket.fileno()))
             self.close()
+
+    def _move_all_bytes(self):
+        self._chunks.append(self._pending_blocks.pop())
 
     def _extract_all_segments(self):
         if not self._shortage:
@@ -429,6 +444,27 @@ class SimpleHttpClient(object):
 
 #===============================================================================
 
+def watch_headers(url, headers = {}, method = 'GET', body = None,
+                  verbose = False):
+    width_a = 20
+    width_b = 10
+    print("{mark:s} fetch URL: {url:s} {mark:s}".format(
+        url = url, mark = '=' * width_a))
+
+    hc = SimpleHttpClient(verbose = verbose)
+    hc.fetch_page(url, headers = headers, method = method, body = body)
+    print("{mark:s} request headers:\n{data:s}".format(
+        mark = '>' * width_b, data = '\r\n'.join(hc._prologue_rows),
+        ))
+    print("{mark:s} response headers:\n{data:s}".format(
+        mark = '<' * width_b, data = hc._prologue.decode(hc._PROLOGUE_ENCODING),
+        ))
+    print("{mark:s} response content length: {la:d} (raw {lb:d})".format(
+        mark = '-' * width_b, la = len(hc.contents), lb = len(hc.raw_contents),
+        ))
+
+    return hc
+
 def print_summary(hc):
     if not isinstance(hc, SimpleHttpClient):
         raise TypeError("not an instance of SimpleHttpClient")
@@ -446,8 +482,18 @@ def print_summary(hc):
     print("content length:\n\t{!s}".format(len(hc.contents)))
 
 if __name__ == '__main__':
-    hc = SimpleHttpClient(verbose = True)
-    for page in ("http://localhost/", "http://localhost/phpinfo.php"):
-        hc.fetch_page(page)
-        print_summary(hc)
-        print()
+    if 0:
+        for page in ("http://localhost/", "http://localhost/phpinfo.php"):
+            hc = watch_headers(page, verbose = False)
+            print()
+    else:
+        for page in ('http://www.google.com',
+                     'http://cn.bing.com',
+                     'http://www.baidu.com',
+                     'http://www.sina.com.cn',
+                     'http://weibo.com',
+                     ):
+            watch_headers(page,
+                          headers = {'user-agent': CommonUserAgent.Firefox_14},
+                          verbose = False)
+            print()
