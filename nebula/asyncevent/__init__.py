@@ -22,15 +22,14 @@
 
 __all__ = [
            "maximize_total_fds",
-           "Dispatcher", "ScheduledJob",
-           "AsyncEvent",
-           "Error", "ExitNow",
+           "AsyncEvent", "Dispatcher", "ScheduledJob",
+           "AeError", "AeExitNow", "AeAlreadyAttachedError", "AeNotAttachedError",
            "TcpClientDispatcher", "TcpServerDispatcher",
            ]
 
-from ._base_dispatcher import Dispatcher, ScheduledJob
-from ._asyncevent import AsyncEvent
-from ._error import Error, ExitNow
+from ._asyncevent import AsyncEvent, Dispatcher, ScheduledJob
+from ._error import (AeError, AeExitNow, AeAlreadyAttachedError,
+                     AeNotAttachedError)
 from ._socket_dispatcher import TcpClientDispatcher, TcpServerDispatcher
 
 def maximize_total_fds():
