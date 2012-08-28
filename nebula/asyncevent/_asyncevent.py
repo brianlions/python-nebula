@@ -23,9 +23,9 @@ import os
 import select
 import time
 
+from .. import debug_info as _debug_info
 from .. import log as _log
 from . import _error
-from . import _base_dispatcher
 
 class _SelectApiWrapper(object):
     SELECT_IN, SELECT_OUT, SELECT_ERR = 0x01, 0x02, 0x04
@@ -275,7 +275,7 @@ class AsyncEvent(_log.WrappedLogger):
           IOError:   with errno EEXIST if the dispatcher was already registered.
         '''
 
-        if not isinstance(disp_obj, _base_dispatcher.Dispatcher):
+        if not isinstance(disp_obj, Dispatcher):
             if self._raise_exceptions:
                 raise TypeError('disp_obj {:s} is not an instance of Dispatcher'.format(repr(disp_obj)))
             else:
@@ -284,6 +284,8 @@ class AsyncEvent(_log.WrappedLogger):
         file_number = disp_obj.fileno()
 
         if file_number not in self._registered_dispatchers:
+            disp_obj.attach_to_pollster(self)
+
             flags = 0
             flag_names = []
             if disp_obj.monitor_readable():
@@ -334,7 +336,7 @@ class AsyncEvent(_log.WrappedLogger):
           IOError:   with errno ENOENT if the dispatcher was already registered.
         '''
 
-        if not isinstance(disp_obj, _base_dispatcher.Dispatcher):
+        if not isinstance(disp_obj, Dispatcher):
             if self._raise_exceptions:
                 raise TypeError('disp_obj {:s} is not an instance of Dispatcher'.format(repr(disp_obj)))
             else:
@@ -343,6 +345,8 @@ class AsyncEvent(_log.WrappedLogger):
         file_number = disp_obj.fileno()
 
         if file_number in self._registered_dispatchers:
+            disp_obj.detach_from_pollster(self)
+
             del self._registered_dispatchers[file_number]
             del self._monitored_events[file_number]
             self.__remove_timeout_fd(file_number)
@@ -409,26 +413,26 @@ class AsyncEvent(_log.WrappedLogger):
             if (self._event_pri_mask != self._event_in_mask) \
             and (flags & self._event_pri_mask) \
             and (fd in self._registered_dispatchers):
-                disp_obj.handle_expt_event(self)
+                disp_obj.handle_expt_event()
 
             # 2nd: IN event
             if (flags & self._event_in_mask) \
             and (fd in self._registered_dispatchers):
-                disp_obj.handle_read_event(self)
+                disp_obj.handle_read_event()
 
             # 3rd: OUT event
             if (flags & self._event_out_mask) \
             and (fd in self._registered_dispatchers):
-                disp_obj.handle_write_event(self)
+                disp_obj.handle_write_event()
 
             # 4th: HUP and ERR event
             if (flags & (self._event_hup_mask | self._event_err_mask)) \
             and (fd in self._registered_dispatchers):
-                disp_obj.handle_close(self)
-        except (_error.ExitNow, KeyboardInterrupt, SystemExit):
+                disp_obj.handle_close()
+        except (_error.AeExitNow, KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
-            disp_obj.handle_error(self, e)
+            disp_obj.handle_error(e)
 
     def __loop_step(self):
         nearest_timeout = -1
@@ -509,7 +513,7 @@ class AsyncEvent(_log.WrappedLogger):
                 if timeout > now:
                     break
                 del self._time_events[0]
-                job_obj.handle_job_event(self)
+                job_obj.handle_job_event()
                 new_timeout = job_obj.schedule()
                 if new_timeout:
                     self._time_events.append((new_timeout, job_obj))
@@ -583,3 +587,266 @@ class AsyncEvent(_log.WrappedLogger):
             self.__loop_step()
 
         self.log_notice("finishing {:s}".format(self))
+
+#------------------------------------------------------------------------------ 
+
+class Dispatcher(_log.WrappedLogger):
+    '''Wrapper around lower level file (or socket) descriptor object.
+
+    This class turns a file (or socket) descriptor into a non-blocking object,
+    and when certain low level events fired, the asynchronous loop will detect
+    it and calls corresponding handler methods to handle it.
+    '''
+
+    def __init__(self, log_handle = None):
+        _log.WrappedLogger.__init__(self, log_handle)
+        self.__pollster = None
+
+    def attach_to_pollster(self, pollster):
+        if not isinstance(pollster, AsyncEvent):
+            raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
+        if self.__pollster:
+            raise _error.AeAlreadyAttachedError
+        self.__pollster = pollster
+
+    def detach_from_pollster(self, pollster):
+        if not isinstance(pollster, AsyncEvent):
+            raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
+        if not self.__pollster:
+            raise _error.AeNotAttachedError
+        self.__pollster = None
+
+    def pollster(self, raise_exception = True):
+        if not self.__pollster and raise_exception:
+            raise _error.AeNotAttachedError
+        return self.__pollster
+
+    # 1. helper methods, implement these methods in derived classes
+
+    def fileno(self):
+        '''Returns file descriptor of the open file (or socket).
+
+        NOTES:
+          Subclass must override this method.
+        '''
+
+        raise NotImplementedError("{:s}.{:s}: fileno() not implemented".format(
+            self.__class__.__module__, self.__class__.__name__))
+
+    def close(self):
+        '''Closes the underlying file descriptor (or socket).
+
+        NOTES:
+          Subclass must override this method.
+        '''
+
+        raise NotImplementedError("{:s}.{:s}: close() not implemented".format(
+            self.__class__.__module__, self.__class__.__name__))
+
+    # 2. predicate for AsyncEvent, implement these methods in derived classes
+
+    def readable(self):
+        '''Determine whether read event on the underlying fd should be waited.
+
+        At the beginning of each round of the asynchronous loop, this method
+        will be called.
+        '''
+
+        self.log_notice("{:s}.{:s}: using default readable()".format(
+            self.__class__.__module__, self.__class__.__name__))
+        return True
+
+    def writable(self):
+        '''Determine whether write event on the underlying fd should be waited.
+
+        At the beginning of each round of the asynchronous loop, this method
+        will be called.
+        '''
+
+        self.log_notice("{:s}.{:s}: using default writable()".format(
+            self.__class__.__module__, self.__class__.__name__))
+        return True
+
+    def timeout(self):
+        '''Determine whether timeout event on the underlying fd should be waited.
+
+        At the beginning of each round of the asynchronous loop, this method
+        will be called.
+
+        Returns:
+          time in seconds (as float) since the Epoch, if interested in timeout
+          event; either None or 0, if not interested in timeout event.
+        '''
+
+        self.log_notice("{:s}.{:s}: using default timeout()".format(
+            self.__class__.__module__, self.__class__.__name__))
+        return None
+
+    # 3. methods used for handling of events, implement these methods in derived
+    #    classes
+
+    def handle_read(self):
+        '''Called when the underlying fd is readable.'''
+
+        self.log_notice("{:s}.{:s}: using default handle_read()".format(
+            self.__class__.__module__, self.__class__.__name__))
+
+    def handle_write(self):
+        '''Called when the underlying fd is writable.'''
+
+        self.log_notice("{:s}.{:s}: using default handle_write()".format(
+            self.__class__.__module__, self.__class__.__name__))
+
+    def handle_timeout(self):
+        '''Called when the underlying fd is timed out.'''
+
+        self.log_notice("{:s}.{:s}: using default handle_timeout()".format(
+            self.__class__.__module__, self.__class__.__name__))
+
+    def handle_expt(self):
+        '''Called when there's out of band (OOB) data for the underlying fd.'''
+
+        self.log_notice("{:s}.{:s}: using default handle_expt()".format(
+            self.__class__.__module__, self.__class__.__name__))
+
+    def handle_error(self, exception_obj):
+        '''Called when an exception was raised and not handled.
+
+        This default version prints a traceback, then calls `handle_close()',
+        in order to dissociate the underlying fd from the AsyncEvent object and
+        closes it.
+
+        NOTES:
+          1. there's NO accompanying method `handle_error_event()';
+          2. this method calls handle_close()!
+          3. Subclass (e.g. D) may do necessary cleanup, and use the `super()'
+             method to call this method:
+             e.g.
+               >>> class Derived(Dispatcher):
+               >>>   def handle_error(self, ae_obj, exception_obj):
+               >>>      ...
+               >>>      # do something
+               >>>      ...
+               >>>      super(Derived, self).handle_error(ae_obj, exception_obj)
+        '''
+
+        if exception_obj:
+            unused_nil, exp_type, exp_value, exp_traceback = _debug_info.compact_traceback()
+            self.log_notice('error, exception {:s} (type: {:s}, callstack: {:s}), fd {:d}, ae {:s}'.format(
+                exp_value, exp_type, exp_traceback, self.fileno(), self.pollster(False)))
+        else:
+            self.log_notice('error, fd {:d}, ae {:s}'.format(self.fileno(), self.pollster(False)))
+        self.handle_close()
+
+    def handle_close(self):
+        '''Called when the underlying fd was closed.
+
+        NOTES:
+          1. there's NO accompanying method `handle_close_event()';
+          2. this method closes the underlying fd, after dissociate it from
+             `ae_obj';
+          3. Subclass (e.g. D) may do necessary cleanup, and use the `super()'
+             method to call this method:
+             e.g.
+               >>> class Derived(Dispatcher):
+               >>>   def handle_close(self, ae_obj):
+               >>>      ...
+               >>>      # do something
+               >>>      ...
+               >>>      super(Derived, self).handle_close(ae_obj)
+        '''
+
+        if self.pollster(False):
+            self.log_info("unregister, dispatcher {:s}, ae {:s}".format(self,
+                self.pollster()))
+            self.pollster().unregister(self)
+
+        self.close()
+
+    # 4. Following methods are called by AsyncEvent directly. These methods are
+    #    used when implementing higher level dispatcher classes, in order to do
+    #    more sophisticated preparation (e.g. asynchronous TCP connection, SOCKS
+    #    connection, etc.), before passing control to thos user implemented
+    #    methods, e.g. handle_read(), handle_write(), readable(), writable() etc.
+
+    def handle_read_event(self, call_user_func = True):
+        if call_user_func:
+            self.handle_read()
+
+    def handle_write_event(self, call_user_func = True):
+        if call_user_func:
+            self.handle_write()
+
+    def handle_timeout_event(self, call_user_func = True):
+        if call_user_func:
+            self.handle_timeout()
+
+    def handle_expt_event(self, call_user_func = True):
+        if call_user_func:
+            self.handle_expt()
+
+    def monitor_readable(self, call_user_func = True):
+        if call_user_func:
+            return self.readable()
+        else:
+            return True
+
+    def monitor_writable(self, call_user_func = True):
+        if call_user_func:
+            return self.writable()
+        else:
+            return True
+
+    def monitor_timeout(self, call_user_func = True):
+        if call_user_func:
+            return self.timeout()
+        else:
+            return None
+
+#  -----------------------------------------------------------------------------
+
+class ScheduledJob(_log.WrappedLogger):
+    '''Base class of scheduled job.'''
+
+    def __init__(self, log_handle = None):
+        _log.WrappedLogger.__init__(self, log_handle = log_handle)
+        self.__pollster = None
+
+#    def attach_to_pollster(self, pollster):
+#        if not isinstance(pollster, AsyncEvent):
+#            raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
+#        if self.__pollster:
+#            raise _error.AeAlreadyAttachedError
+#        self.__pollster = pollster
+#
+#    def detach_from_pollster(self, pollster):
+#        if not isinstance(pollster, AsyncEvent):
+#            raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
+#        if not self.__pollster:
+#            raise _error.AeNotAttachedError
+#        self.__pollster = None
+#
+#    def pollster(self, raise_exception = True):
+#        if not self.__pollster and raise_exception:
+#            raise _error.AeNotAttachedError
+#        return self.__pollster
+
+    # implement these two methods in derived classes
+
+    def schedule(self):
+        '''Determine whether we need to schedule this job in the future or not.
+
+        Returns:
+          Time in seconds (as float) since the Epoch; or None or 0, if this job
+          no longer need to be scheduled in the future.
+        '''
+
+        self.log_notice("{:s}.{:s}: schedule() not implement".format(
+            self.__class__.__module__, self.__class__.__name__))
+        return None
+
+    def handle_job_event(self):
+        '''Called to handle the job event.'''
+
+        self.log_notice("{:s}.{:s}: using default handle_timeout()".format(
+            self.__class__.__module__, self.__class__.__name__))

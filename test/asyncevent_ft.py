@@ -59,7 +59,7 @@ User-Agent: AsyncEvent-test-py\r
         else:
             return time.time() + self.__idle_connection
 
-    def handle_read(self, ae_obj):
+    def handle_read(self):
         recv = self._sock.recv(4096)
         if len(recv):
             self.__response_data += recv
@@ -68,21 +68,21 @@ User-Agent: AsyncEvent-test-py\r
                                                                           self.__response_data.decode('utf-8')))
         else:
             self.log_info("connection closed by remote node")
-            self.handle_close(ae_obj)
+            self.handle_close()
 
-    def handle_write(self, ae_obj):
+    def handle_write(self):
         sent = self._sock.send(self.__request_data)
         self.__request_data = self.__request_data[sent:]
         self.log_info("%d bytes sent, %d bytes remaining" % (sent, len(self.__request_data)))
 
-    def handle_timeout(self, ae_obj):
+    def handle_timeout(self):
         if not self.is_connected():
             self.log_notice("connection attempt time out, closing socket ...")
-            self.handle_close(ae_obj)
+            self.handle_close()
         if not len(self.__request_data):
             self.log_info("all data was sent, connection was idle for a {:.3f} sec, closing ...".format(
                 self.__idle_connection))
-            self.handle_close(ae_obj)
+            self.handle_close()
 
 class DemoTestConnectedClientDispatcher(TcpClientDispatcher):
     '''
@@ -104,7 +104,7 @@ class DemoTestConnectedClientDispatcher(TcpClientDispatcher):
     def timeout(self):
         return self._last_activity_time + self._max_idle_secs
 
-    def handle_write(self, ae_obj):
+    def handle_write(self):
         sent = self._sock.send(self._response)
         self.log_info("%d of %d bytes sent to client (local %s <---> peer %s)" % (sent,
                                                                                   len(self._response),
@@ -113,15 +113,15 @@ class DemoTestConnectedClientDispatcher(TcpClientDispatcher):
                                                                                   ))
         self._response = self._response[sent:]
         if len(self._response) == 0:
-            self.handle_close(ae_obj)
+            self.handle_close()
         else:
             self._last_activity_time = time.time()
 
-    def handle_timeout(self, ae_obj):
+    def handle_timeout(self):
         self.log_info("closing idle connection, no activity during last %f secs, sock_fd %d (local %s <---> peer %s)" % \
                       (self._max_idle_secs, self.fileno(), self.local_addr_repr(), self.peer_addr_repr(),)
                       )
-        self.handle_close(ae_obj)
+        self.handle_close()
 
 class DemoTestServerTimeEvent(ScheduledJob):
     def __init__(self, log_handle = None):
@@ -138,7 +138,7 @@ class DemoTestServerTimeEvent(ScheduledJob):
         else:
             return None
 
-    def handle_job_event(self, ae_obj):
+    def handle_job_event(self):
         self.log_info("scheduled sub job %d / %d finished, interval %.3f sec" % \
                       (self._count, self._max_count, self._interval_sec))
 
@@ -157,8 +157,8 @@ class DemoTestAsyncEventInspect(ScheduledJob):
         else:
             return None
 
-    def handle_job_event(self, ae_obj):
-        self.log_info("inspection %d / %d finished, ae_obj %s" % (self._count, self._max_count, ae_obj))
+    def handle_job_event(self):
+        self.log_info("inspection %d / %d finished" % (self._count, self._max_count))
 
 class DemoTestServerDispatcher(TcpServerDispatcher):
     '''
@@ -174,7 +174,7 @@ class DemoTestServerDispatcher(TcpServerDispatcher):
         self._max_idle_report_count = 5
         self._idle_report_count = 0
 
-    def prepare_serving_client(self, conn_sock, conn_addr, ae_obj):
+    def prepare_serving_client(self, conn_sock, conn_addr):
         self._num_conns_recently += 1
         self._total_connections += 1
         if False:
@@ -182,12 +182,12 @@ class DemoTestServerDispatcher(TcpServerDispatcher):
                           (conn_sock.fileno(), str(conn_addr)))
             conn_sock.close()
         else:
-            ae_obj.register(DemoTestConnectedClientDispatcher(conn_sock, log_handle = self.get_log_handle()))
+            self.pollster().register(DemoTestConnectedClientDispatcher(conn_sock, log_handle = self.get_log_handle()))
 
     def timeout(self):
         return time.time() + self._report_interval
 
-    def handle_timeout(self, ae_obj):
+    def handle_timeout(self):
         self.log_info("%s.%s handling timeout event!" % (self.__class__.__module__,
                                                          self.__class__.__name__))
 
@@ -200,7 +200,7 @@ class DemoTestServerDispatcher(TcpServerDispatcher):
 
         if self._idle_report_count == self._max_idle_report_count:
             self.log_info("closing server socket, %d connections in total" % self._total_connections)
-            self.handle_close(ae_obj)
+            self.handle_close()
 
 def test(test_name, log_level = 'info', event_api = "default"):
     '''

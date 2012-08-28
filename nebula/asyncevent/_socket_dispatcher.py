@@ -23,11 +23,11 @@ import socket
 import time
 
 from .. import log as _log
-from . import _base_dispatcher
+from . import _asyncevent
 
 #------------------------------------------------------------------------------ 
 
-class _SocketDispatcher(_base_dispatcher.Dispatcher):
+class _SocketDispatcher(_asyncevent.Dispatcher):
     __socket_family_names = {
                              socket.AF_INET:  "AF_INET",
                              socket.AF_INET6: "AF_INET6",
@@ -39,7 +39,7 @@ class _SocketDispatcher(_base_dispatcher.Dispatcher):
                            }
 
     def __init__(self, sock = None, log_handle = None):
-        _base_dispatcher.Dispatcher.__init__(self, log_handle = log_handle)
+        _asyncevent.Dispatcher.__init__(self, log_handle = log_handle)
         self._sock = sock
         if sock:
             self.__so_family, self.__so_type = sock.family, sock.type
@@ -280,7 +280,7 @@ class TcpClientDispatcher(_SocketDispatcher):
         else:
             return None
 
-    def handle_write_event(self, ae_obj, call_user_func = True):
+    def handle_write_event(self, call_user_func = True):
         if not self.__connected:
             err = self._sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if err != 0:
@@ -291,9 +291,9 @@ class TcpClientDispatcher(_SocketDispatcher):
             self.set_local_addr(self._sock.getsockname())
         else:
             if call_user_func:
-                self.handle_write(ae_obj)
+                self.handle_write()
 
-    def handle_timeout_event(self, ae_obj, call_user_func = True):
+    def handle_timeout_event(self, call_user_func = True):
         '''Generates a log message if the connect attempt timed out.
 
         Notes:
@@ -304,7 +304,7 @@ class TcpClientDispatcher(_SocketDispatcher):
             self.log_info("fd {:d}, connection to {:s} timedout".format(
                 self.fileno(), self.peer_addr_repr()))
         if call_user_func:
-            self.handle_timeout(ae_obj)
+            self.handle_timeout()
 
 #------------------------------------------------------------------------------ 
 
@@ -387,7 +387,7 @@ class TcpServerDispatcher(_SocketDispatcher):
                 self.log_warning("caught UNEXPECTED exception socket.error: {:s}".format(e))
                 raise
 
-    def prepare_serving_client(self, conn_sock, conn_addr, ae_obj):
+    def prepare_serving_client(self, conn_sock, conn_addr):
         self.log_notice("{:s}.{:s}: using default prepare_serving_client()".format(
             self.__class__.__module__, self.__class__.__name__))
         self.log_info("closing newly accepted connect without serving, fd {:d}, peer address {:s}".format(
@@ -407,8 +407,8 @@ class TcpServerDispatcher(_SocketDispatcher):
     # user can derive from this class, and use a customized handle_read() with
     # enhanced features (e.g. access control beased on white-list or black-list).
     # It is strange to force the user to re-implement handle_read_event().
-    def handle_read(self, ae_obj):
+    def handle_read(self):
         new_client = self.accept()
         if new_client:
             conn_sock, conn_addr = new_client[0], new_client[1]
-            self.prepare_serving_client(conn_sock, conn_addr, ae_obj)
+            self.prepare_serving_client(conn_sock, conn_addr)

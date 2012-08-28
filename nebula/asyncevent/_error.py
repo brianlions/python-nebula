@@ -18,8 +18,21 @@
 # along with pynebula. If not, see <http://www.gnu.org/licenses/>.
 #
 
-class Error(Exception):
+__all__ = [
+           "AeError",
+           "AeExitNow",
+           "AeAlreadyAttachedError",
+           "AeNotAttachedError",
+           ]
+
+class AeError(Exception):
     pass
 
-class ExitNow(Exception):
+class AeExitNow(Exception):
+    pass
+
+class AeAlreadyAttachedError(AeError):
+    pass
+
+class AeNotAttachedError(AeError):
     pass
