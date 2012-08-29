@@ -23,6 +23,10 @@ import time
 import urllib.parse
 import gzip, zlib
 import sys
+import ssl
+import os.path
+
+from ssl import (CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED)
 
 class HttpClientError(Exception):
     pass
@@ -40,6 +44,9 @@ class CommonUserAgent(object):
     IE_8 = ('Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1; Trident/4.0;'
             ' .NET CLR 2.0.50727; .NET CLR 3.0.04506.648; .NET CLR 3.5.21022;'
             ' .NET CLR 3.0.4506.2152; .NET CLR 3.5.30729)')
+
+CA_CERTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "cacerts_ubuntu.txt")
 
 class SimpleHttpClient(object):
     '''A simple HTTP client.'''
@@ -78,6 +85,8 @@ class SimpleHttpClient(object):
         # request line and headers to send
         self._prologue_rows = []
 
+        # whether SSL was used
+        self._ssl_encryption = False
         # status line and headers received
         self._prologue = b''
         # http status line
@@ -112,6 +121,7 @@ class SimpleHttpClient(object):
 
         self._prologue_rows = []
 
+        self._ssl_encryption = False
         self._prologue = b''
         self._http_version = None
         self._status_code = None
@@ -131,22 +141,26 @@ class SimpleHttpClient(object):
     def _set_verbose(self, value):
         self._verbose = value
 
-    verbose = property(_get_verbose, _set_verbose)
+    verbose = property(_get_verbose, _set_verbose, doc = 'Verbose mode or not.')
 
     @property
     def http_version(self):
+        '''HTTP version from response line.'''
         return self._http_version
 
     @property
     def status_code(self):
+        '''HTTP status code from response line.'''
         return self._status_code
 
     @property
     def reason_phrase(self):
+        '''HTTP reason phrase from response line.'''
         return self._reason_phrase
 
     @property
     def headers(self):
+        '''Dict of headers from response message.'''
         return self._response_headers.copy()
 
     @property
@@ -239,19 +253,30 @@ class SimpleHttpClient(object):
                     header_line))
 
     def close(self):
+        '''Close (keep-alive) connection.'''
+
         if self._socket:
             self._socket.close()
             self._socket = None
             self._peer_name, self._peer_ip, self._peer_port = '', '', 0
 
-    def fetch_page(self, url, headers = {}, method = 'GET', body = None):
+    def fetch_page(self, url, headers = {}, method = 'GET', body = None,
+                   keyfile = None, certfile = None,
+                   cert_reqs = CERT_NONE, ca_certs = CA_CERTS):
         '''Fetch the specified URL.
 
         Args:
-          url:     resource to fetch
-          headers: user-supplied headers to send
-          method:  HTTP request method to use
-          body:    additional content to send
+          url:       resource to fetch
+          headers:   user-supplied headers to send
+          method:    HTTP request method to use
+          body:      additional content to send
+          keyfile & certfile:
+                     files which contain a certificat to be used to identify
+                     the local principle
+          cert_reqs: whether a certificate is required from the server, three
+                     valid values: ssl.CERT_NONE (default), ssl.CERT_OPTIONAL,
+                     and ssl.CERT_REQUIRED
+          ca_certs:  a file contains a set of concatenated "CA" certificates
         '''
 
         self._reset()
@@ -259,7 +284,7 @@ class SimpleHttpClient(object):
         # make all head field names titlecased
         customized_headers = dict([(k.title(), v) for k, v in headers.items()])
 
-        scheme, netloc, path = urllib.parse.urlsplit(url)[0:3]
+        scheme, netloc, path = urllib.parse.urlsplit(url, scheme = 'http')[0:3]
         if not netloc:
             raise HttpClientError("Malformed URL (do not forget the scheme, e.g. `http://')")
         if 'Host' not in customized_headers:
@@ -270,9 +295,11 @@ class SimpleHttpClient(object):
             request_uri = url[url.find(netloc) + len(netloc) : ]
 
         if (not scheme) or scheme == 'http':
+            self._ssl_encryption = False
             port_num = self._HTTP_PORT
-#        elif scheme == 'https':
-#            port_num = self._HTTPS_PORT
+        elif scheme == 'https':
+            self._ssl_encryption = True
+            port_num = self._HTTPS_PORT
         else:
             raise HttpClientError("Unsupported scheme `{:s}'".format(scheme))
 
@@ -309,7 +336,12 @@ class SimpleHttpClient(object):
         or (port_num != self._peer_port):
             self.close() # different peer node, we can not reuse the socket
 
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if self._ssl_encryption:
+                self._socket = ssl.wrap_socket(socket.socket(),
+                    keyfile = keyfile, certfile = certfile,
+                    cert_reqs = cert_reqs, ca_certs = ca_certs)
+            else:
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket.connect((netloc, port_num))
             self._peer_name = netloc
             self._peer_ip, self._peer_port = self._socket.getpeername()
