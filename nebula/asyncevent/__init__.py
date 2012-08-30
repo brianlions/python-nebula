@@ -21,10 +21,10 @@
 '''Basic infrastructure for asynchronous event handling.'''
 
 __all__ = [
-           "maximize_total_fds",
-           "AsyncEvent", "Dispatcher", "ScheduledJob",
-           "AeError", "AeExitNow", "AeAlreadyAttachedError", "AeNotAttachedError",
-           "TcpClientDispatcher", "TcpServerDispatcher",
+           'maximize_total_fds',
+           'AsyncEvent', 'Dispatcher', 'ScheduledJob',
+           'AeError', 'AeExitNow', 'AeAlreadyAttachedError', 'AeNotAttachedError',
+           'TcpClientDispatcher', 'TcpServerDispatcher',
            ]
 
 from ._asyncevent import AsyncEvent, Dispatcher, ScheduledJob

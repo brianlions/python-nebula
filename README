@@ -1,1 +1,66 @@
-python-nebula (or pynebula) is a framework for developing network applications.
+pyNebula
+
+Introduction
+------------
+
+pyNebula is a library for developing network applications.  Some of
+the essential modules are:
+
+**Asynchronous Event Handling**
+  Event handling class, and wrapper classes around low level file,
+  socket, and SOCKS descriptor etc.. The event handling class can
+  utilize platform specific event polling API, e.g. epoll(), poll(),
+  or select().
+
+**HTTP and HTTPS**
+  HTTPS support is available if the Python interpreter was compiled
+  with SSL.
+
+**Histogram**
+  Classes to draw a text-based histogram.
+
+**Logging**
+  Logging module with time stamp, file name, line number, and method
+  name prepended to every log message.
+
+For more information on this module, see:
+
+    https://github.com/brianlions/python-nebula
+
+
+Installation
+------------
+
+The pyNebula library is shipped as a distutils package.  To install
+the library, unpack the distribution archive, and issue the following
+command:
+
+    $ python setup.py install
+
+
+Usage
+-----
+
+Several simple applications developed with pyNebula was located in
+the `tests' directory, you can use those apps to experience pyNebula
+for the first time.
+
+
+License
+-------
+
+Copyright (c) 2012 Brian Yi ZHANG <brianlions at gmail dot com>
+
+pyNebula is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+pyNebula is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with pynebula. If not, see <http://www.gnu.org/licenses/>.
+

@@ -19,15 +19,18 @@
 #
 
 __all__ = [
-           "asyncevent",
-           "debug_info",
-           "histogram",
-           "log",
-           "sig_num",
+           'asyncevent',
+           'debug_info',
+           'histogram',
+           'http_client',
+           'log',
+           'sig_num',
            ]
 
 from . import asyncevent
+
 from . import debug_info
 from . import histogram
+from . import http_client
 from . import log
 from . import sig_num

@@ -4,7 +4,13 @@
 .settings/
 .cache/
 
+build/
+dist/
+MANIFEST
+
+poc/
 *.pyc
 *.pyd
 *.pyo
 *.py3
+
