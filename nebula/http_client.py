@@ -262,7 +262,7 @@ class SimpleHttpClient(object):
 
     def fetch_page(self, url, headers = {}, method = 'GET', body = None,
                    keyfile = None, certfile = None,
-                   cert_reqs = CERT_NONE, ca_certs = CA_CERTS):
+                   cert_reqs = CERT_NONE, ca_certs = None):
         '''Fetch the specified URL.
 
         Args:
