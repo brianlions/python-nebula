@@ -113,7 +113,16 @@ class Logger(object):
         return time.strftime('%Y.%m.%d-%H:%M:%S' + ('.%06d' % ((now - int(now)) * 1000000)) + tz_format,
                              use_gmtime and time.gmtime(now) or time.localtime(now))
 
-    def __init__(self, log_mask = None, use_gmtime = False, show_timezone = True):
+    def __init__(self, log_mask = None, use_gmtime = True, show_timezone = True):
+        '''Do the initialization.
+
+        Args:
+          log_mask:      bit masks of the log levels, by default all log levels
+                         up to INFO will be logged.
+          use_gmtime:    whether to use GMT time in log message or not.
+          show_timezone: whether to show time zone in log message or not.
+        '''
+
         self.__log_mask = log_mask and log_mask or self.mask_upto(self.INFO)
         self.__use_gmtime = use_gmtime and True or False
         self.__show_timezone = show_timezone and True or False
@@ -148,7 +157,7 @@ class Logger(object):
         return self.set_log_mask(Logger.mask_upto(max_level))
 
     def is_use_gmtime(self):
-        '''Whether we are using GMT time representation of not.
+        '''Whether we are using GMT time representation or not.
 
         Returns:
           True if using GMT, False otherwise.
@@ -157,7 +166,7 @@ class Logger(object):
         return self.__use_gmtime
 
     def is_show_timezone(self):
-        '''Whether we are printing the time zone of not.
+        '''Whether we are printing the time zone or not.
 
         Returns:
           True if printing time zone, False otherwise.
@@ -280,9 +289,9 @@ class ConsoleLogger(Logger):
             show_timezone = self.is_show_timezone()
 
         # time, log level, file name, line number, method name, log message
-        print("[{:s} {:s} {:s}:{:d}:{:s}] {:s}".format(self.timestamp_str(use_gmtime, show_timezone),
-                                                       self.level_name(level, abbr = True),
-                                                       file_name, line_num, func_name, msg))
+        print("[{:s} {:s} {:s}:{:d}:{:s}] {:s}".format(
+            self.timestamp_str(use_gmtime = use_gmtime, show_timezone = show_timezone),
+            self.level_name(level, abbr = True), file_name, line_num, func_name, msg))
         sys.stdout.flush()
 
 #-------------------------------------------------------------------------------

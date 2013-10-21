@@ -28,6 +28,10 @@ from .. import log as _log
 from . import _error
 
 class _SelectApiWrapper(object):
+    '''Wrap the select.select() into object, similar to select.poll() and
+    select.epoll() objects.
+    '''
+
     SELECT_IN, SELECT_OUT, SELECT_ERR = 0x01, 0x02, 0x04
 
     def __init__(self):
@@ -118,9 +122,9 @@ class AsyncEvent(_log.WrappedLogger):
 
     API_DEFAULT, API_EPOLL, API_POLL, API_SELECT = 0, 1, 2, 3
 
-    __api_names = {API_EPOLL: "epoll", API_POLL: "poll", API_SELECT: "select"}
+    _api_names = {API_EPOLL: "epoll", API_POLL: "poll", API_SELECT: "select"}
 
-    def __init__(self, raise_exceptions = True, api = API_DEFAULT,
+    def __init__(self, raise_exceptions = True, api_hint = API_DEFAULT,
                  log_handle = None):
         '''Asynchronous event loop.
 
@@ -129,7 +133,7 @@ class AsyncEvent(_log.WrappedLogger):
                             to register() an already registered dispatcher, or
                             to unregister() a not registered dispatcher, will
                             raise an IOError exception.
-          api:              Specifies the event API to be used, valid values
+          api_hint:         Specifies the event API to be used, valid values
                             are API_DEFAULT, API_EPOLL, API_POLL, API_SELECT.
                             Note that this argument is just a hint, if the
                             specified API is not supported by the operating
@@ -141,14 +145,14 @@ class AsyncEvent(_log.WrappedLogger):
         _log.WrappedLogger.__init__(self, log_handle = log_handle)
 
         # poll object for I/O events
-        if api <= self.API_EPOLL and hasattr(select, 'epoll'):
-            self.__event_api_init(self.API_EPOLL)
-        elif api <= self.API_POLL and hasattr(select, 'poll'):
-            self.__event_api_init(self.API_POLL)
-        elif api <= self.API_SELECT and hasattr(select, 'select'):
-            self.__event_api_init(self.API_SELECT)
+        if api_hint <= self.API_EPOLL and hasattr(select, 'epoll'):
+            self._event_api_init(self.API_EPOLL)
+        elif api_hint <= self.API_POLL and hasattr(select, 'poll'):
+            self._event_api_init(self.API_POLL)
+        elif api_hint <= self.API_SELECT and hasattr(select, 'select'):
+            self._event_api_init(self.API_SELECT)
         else:
-            raise ValueError("API {:d} is not supported".format(api))
+            raise ValueError("API {:d} is not supported".format(api_hint))
 
         #=======================================================================
         # NOTE:
@@ -160,12 +164,13 @@ class AsyncEvent(_log.WrappedLogger):
         # pipe used by set_stop_flag() to make epoll.poll() return
         self._pipe_rd_end, self._pipe_wr_end = os.pipe()
 
-        self.__set_nonblock_flag(self._pipe_rd_end)
-        self.__set_nonblock_flag(self._pipe_wr_end)
+        self._set_nonblock_flag(self._pipe_rd_end)
+        self._set_nonblock_flag(self._pipe_wr_end)
 
         self.log_debug("AsyncEvent initialized, api {:s}{:s}, pipe (r {:d}, w {:d})".format(
             self.event_api_name(),
-            self.event_api() == self.API_EPOLL and ", epoll_fd {:d}".format(self._pollster.fileno()) or "",
+            self.event_api() == self.API_EPOLL and
+            ", epoll_fd {:d}".format(self._pollster.fileno()) or "",
             self._pipe_rd_end, self._pipe_wr_end))
 
         # --- file events related ---
@@ -185,7 +190,7 @@ class AsyncEvent(_log.WrappedLogger):
 
         self._stop_flag = False
 
-    def __event_api_init(self, api):
+    def _event_api_init(self, api):
         if api == self.API_EPOLL:
             self._pollster = select.epoll()
             self._event_api = self.API_EPOLL
@@ -222,7 +227,7 @@ class AsyncEvent(_log.WrappedLogger):
     def event_api_name(self):
         "String representation of the event API used."
 
-        return self.__api_names[self._event_api]
+        return self._api_names[self._event_api]
 
     def event_api(self):
         "Event API used."
@@ -258,7 +263,8 @@ class AsyncEvent(_log.WrappedLogger):
         return "<%s.%s at %s {api: %s%s, pipe_rd:%d, pipe_wr:%d, dispatchers:%d, jobs:%d, stop_flag:%d}>" % \
             (self.__class__.__module__, self.__class__.__name__, hex(id(self)),
              self.event_api_name(),
-             self.event_api() == self.API_EPOLL and ", epoll_fd:{:d}".format(self._pollster.fileno()) or "",
+             self.event_api() == self.API_EPOLL and
+             ", epoll_fd:{:d}".format(self._pollster.fileno()) or "",
              self._pipe_rd_end, self._pipe_wr_end, self.num_of_dispatchers(),
              self.num_of_scheduled_jobs(), self._stop_flag,)
 
@@ -321,7 +327,7 @@ class AsyncEvent(_log.WrappedLogger):
             return False
         else:
             raise IOError(errno.EEXIST,
-                          "fd {:d} was already registered".format(disp_obj.fileno()))
+                          "fd {:d} was already registered".format(file_number))
 
     def unregister(self, disp_obj):
         '''Unregister a dispatcher object.
@@ -349,7 +355,7 @@ class AsyncEvent(_log.WrappedLogger):
 
             del self._registered_dispatchers[file_number]
             del self._monitored_events[file_number]
-            self.__remove_timeout_fd(file_number)
+            self._remove_timeout_fd(file_number)
             self._pollster.unregister(file_number)
             return True
         elif not self._raise_exceptions:
@@ -373,7 +379,7 @@ class AsyncEvent(_log.WrappedLogger):
         else:
             return False
 
-    def __set_nonblock_flag(self, fd):
+    def _set_nonblock_flag(self, fd):
         '''Set O_NONBLOCK flag for the supplied file descriptor.
 
         Returns:
@@ -401,7 +407,7 @@ class AsyncEvent(_log.WrappedLogger):
         except ImportError:
             return False
 
-    def __process_fired_events(self, fd, flags):
+    def _process_fired_events(self, fd, flags):
         disp_obj = self._registered_dispatchers[fd]
 
         try:
@@ -434,13 +440,13 @@ class AsyncEvent(_log.WrappedLogger):
         except Exception as e:
             disp_obj.handle_error(e)
 
-    def __loop_step(self):
+    def _loop_step(self):
         nearest_timeout = -1
 
         now = time.time()
 
         if len(self._fds_with_timeout):
-            self.__sort_timeout_fds()
+            self._sort_timeout_fds()
             nt = self._fds_with_timeout[0][0] - now
 
             if nt <= 0: # already timed out
@@ -450,7 +456,7 @@ class AsyncEvent(_log.WrappedLogger):
                     nearest_timeout = nt
 
         if len(self._time_events):
-            self.__sort_time_events()
+            self._sort_time_events()
             nt = self._time_events[0][0] - now
 
             if nt <= 0: # already timed out
@@ -493,8 +499,8 @@ class AsyncEvent(_log.WrappedLogger):
                     self.log_debug("events fired, fd {:d}, flags ({:s})".format(
                         fd, " ".join(flag_names)))
 
-                self.__process_fired_events(fd, flags)
-                self.__update_associated_events(fd)
+                self._process_fired_events(fd, flags)
+                self._update_associated_events(fd)
         else:
             now = time.time()
 
@@ -505,7 +511,7 @@ class AsyncEvent(_log.WrappedLogger):
                 del self._fds_with_timeout[0]
 
                 self._registered_dispatchers[fd].handle_timeout_event(self)
-                self.__update_associated_events(fd)
+                self._update_associated_events(fd)
 
             # handle scheduled jobs
             # TODO: it seems strange to deleting items from iterable while iterating
@@ -518,26 +524,26 @@ class AsyncEvent(_log.WrappedLogger):
                 if new_timeout:
                     self._time_events.append((new_timeout, job_obj))
 
-    def __sort_timeout_fds(self):
+    def _sort_timeout_fds(self):
         self._fds_with_timeout = sorted(self._fds_with_timeout,
                                         key = lambda item: item[0])
 
-    def __sort_time_events(self):
+    def _sort_time_events(self):
         self._time_events = sorted(self._time_events,
                                    key = lambda item: item[0])
 
-    def __remove_timeout_fd(self, fd):
+    def _remove_timeout_fd(self, fd):
         for (idx, (unused_timeout, a_fd)) in enumerate(self._fds_with_timeout):
             if fd == a_fd:
                 del self._fds_with_timeout[idx]
                 # assume there's no duplicated fd in self._fds_with_timeout[]
                 break
 
-    def __update_associated_events(self, fd):
+    def _update_associated_events(self, fd):
         if fd not in self._registered_dispatchers:
             return
 
-        self.__remove_timeout_fd(fd)
+        self._remove_timeout_fd(fd)
 
         disp_obj = self._registered_dispatchers[fd]
 
@@ -584,7 +590,7 @@ class AsyncEvent(_log.WrappedLogger):
 
         while (not self.get_stop_flag()) \
         and (self.num_of_dispatchers() or self.num_of_scheduled_jobs()):
-            self.__loop_step()
+            self._loop_step()
 
         self.log_notice("finishing {:s}".format(self))
 
@@ -600,26 +606,29 @@ class Dispatcher(_log.WrappedLogger):
 
     def __init__(self, log_handle = None):
         _log.WrappedLogger.__init__(self, log_handle)
-        self.__pollster = None
+        self._pollster = None
 
     def attach_to_pollster(self, pollster):
         if not isinstance(pollster, AsyncEvent):
             raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
-        if self.__pollster:
+        if self._pollster:
             raise _error.AeAlreadyAttachedError
-        self.__pollster = pollster
+        self._pollster = pollster
 
     def detach_from_pollster(self, pollster):
         if not isinstance(pollster, AsyncEvent):
             raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
-        if not self.__pollster:
+        if not self._pollster:
             raise _error.AeNotAttachedError
-        self.__pollster = None
+        # TODO should we raise an exception?
+        #if self._pollster != pollster:
+        #    pass
+        self._pollster = None
 
     def pollster(self, raise_exception = True):
-        if not self.__pollster and raise_exception:
+        if not self._pollster and raise_exception:
             raise _error.AeNotAttachedError
-        return self.__pollster
+        return self._pollster
 
     # 1. helper methods, implement these methods in derived classes
 
@@ -810,26 +819,26 @@ class ScheduledJob(_log.WrappedLogger):
 
     def __init__(self, log_handle = None):
         _log.WrappedLogger.__init__(self, log_handle = log_handle)
-        self.__pollster = None
+        self._pollster = None
 
 #    def attach_to_pollster(self, pollster):
 #        if not isinstance(pollster, AsyncEvent):
 #            raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
-#        if self.__pollster:
+#        if self._pollster:
 #            raise _error.AeAlreadyAttachedError
-#        self.__pollster = pollster
+#        self._pollster = pollster
 #
 #    def detach_from_pollster(self, pollster):
 #        if not isinstance(pollster, AsyncEvent):
 #            raise TypeError("{:s}: not instance of AsyncEvent".format(repr(pollster)))
-#        if not self.__pollster:
+#        if not self._pollster:
 #            raise _error.AeNotAttachedError
-#        self.__pollster = None
+#        self._pollster = None
 #
 #    def pollster(self, raise_exception = True):
-#        if not self.__pollster and raise_exception:
+#        if not self._pollster and raise_exception:
 #            raise _error.AeNotAttachedError
-#        return self.__pollster
+#        return self._pollster
 
     # implement these two methods in derived classes
 

@@ -235,7 +235,7 @@ def test(test_name, log_level = 'info', event_api = "default"):
     log_handle = log.ConsoleLogger(log_mask = log.Logger.mask_upto(log.Logger.NOTICE))
     log_handle.set_max_level(levels[log_level])
 
-    ae = AsyncEvent(log_handle = log_handle, api = apis[event_api])
+    ae = AsyncEvent(log_handle = log_handle, api_hint = apis[event_api])
     if test_name == 'client':
         mc = DemoTestClientDispatcher(log_handle = log_handle)
         mc.initialize(peer_addr = ('www.example.com', 80), connect_timeout = 10.0,

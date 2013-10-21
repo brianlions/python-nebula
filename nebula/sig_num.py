@@ -32,6 +32,8 @@ class SignalNumbers(object):
 
     @classmethod
     def signal_name(cls, signum, exception = True):
+        '''Get string name of the specified signal number.'''
+
         try:
             return "{:s}".format(cls.__sig_names[signum])
         except KeyError:

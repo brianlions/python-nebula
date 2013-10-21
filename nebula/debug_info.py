@@ -59,10 +59,12 @@ def compact_traceback(multiline = False, indent = ''):
       indent:    indent lines if multiline is True
 
     Returns:
-      A tuple of four items: the 1st item is a tuple of three items, are the
-      file name, line number, and method name, of the statement that raised the
-      exception; the 2nd item is the type of the exception; the 3rd item is the
-      exception; the 4th item is a string representation of the call stack.
+      A tuple of four items:
+        1st item is a tuple of three items, are the file name, line number, and
+            method name, of the statement that raised the exception;
+        2nd item is the type of the exception;
+        3rd item is the exception;
+        4th item is a string representation of the call stack.
     '''
 
     exp_type, exp_value, exp_traceback = sys.exc_info()
@@ -99,6 +101,16 @@ def compact_traceback(multiline = False, indent = ''):
               '\n'.join(['{:s}:{:s}:{:s}'.format(x[0], x[2], x[1]) for x in exp_tb_info])
 
 def hex_dump(buf, addr_prefix = False, width = 0):
+    '''Returns a HEX representation of the `buf'.
+
+    Args:
+      addr_prefix prefix each line with the offset in hex decimal if True.
+      width       max number of bytes to dump on every line.
+
+    Returns:
+      The HEX representation of the buffer `buf'.
+    '''
+
     items = []
     buf_len = len(buf)
 
